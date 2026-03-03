@@ -1,0 +1,12 @@
+# Secrets
+.env
+
+# Runtime state
+seen_ids.json
+
+# Python
+__pycache__/
+*.pyc
+
+# OS
+.DS_Store
