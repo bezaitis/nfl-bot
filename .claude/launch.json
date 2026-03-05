@@ -1,0 +1,11 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "NFL Bot",
+      "runtimeExecutable": "python3",
+      "runtimeArgs": ["bot.py"],
+      "port": 0
+    }
+  ]
+}

@@ -208,7 +208,7 @@ def involves_prominent_player(item: dict) -> bool:
 # ── 4. Contract signing filter ────────────────────────────────────────────────
 
 # Tune these to adjust what counts as a "big" signing
-AAV_THRESHOLD_M = 30       # $30M+ per year
+AAV_THRESHOLD_M = 10       # $10M+ per year
 TOTAL_THRESHOLD_M = 100    # $100M+ total (used only if years can't be parsed)
 
 # Word forms of numbers for "three-year", "four year", etc.

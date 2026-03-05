@@ -3,6 +3,7 @@
 
 # Runtime state
 seen_ids.json
+settings.json
 
 # Python
 __pycache__/
