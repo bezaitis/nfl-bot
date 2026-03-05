@@ -17,10 +17,12 @@ Auto-posting:
 Setup:
   1. Copy .env.example → .env and fill in your values
   2. pip install -r requirements.txt
-  3. python bot.py
+  3. SYNC_COMMANDS=1 python bot.py   ← first run to register slash commands
+  4. python bot.py                   ← subsequent runs
 """
 
 import json
+import logging
 import os
 from datetime import datetime, timezone
 
@@ -36,19 +38,28 @@ from bluesky import get_writer_posts, WRITER_HANDLES
 
 load_dotenv()
 
+# ── Logging ───────────────────────────────────────────────────────────────────
+logging.basicConfig(
+    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S",
+    level=logging.INFO,
+)
+logger = logging.getLogger("nfl-bot")
+
 # ── Config ────────────────────────────────────────────────────────────────────
 TOKEN = os.getenv("DISCORD_TOKEN")
 CHANNEL_ID = int(os.getenv("NEWS_CHANNEL_ID", "0"))
 CHECK_INTERVAL_MINUTES = int(os.getenv("CHECK_INTERVAL_MINUTES", "30"))
+SYNC_COMMANDS = os.getenv("SYNC_COMMANDS", "0").strip().lower() in ("1", "true", "yes")
 SEEN_FILE = "seen_ids.json"
 SETTINGS_FILE = "settings.json"
+SEEN_MAX_SIZE = 500
 
 # ── Bot setup ─────────────────────────────────────────────────────────────────
 intents = discord.Intents.default()
 bot = commands.Bot(command_prefix="!", intents=intents)
 
 # ── Writer metadata ───────────────────────────────────────────────────────────
-# Display names for each handle — used in /writers embed and choices
 WRITER_DISPLAY = {
     "rapsheet.bsky.social":        "Ian Rapoport (NFL Network)",
     "diannarussini.bsky.social":   "Dianna Russini (The Athletic)",
@@ -80,8 +91,7 @@ def load_seen() -> set[str]:
 
 
 def save_seen(seen: set[str]) -> None:
-    # Keep only the most recent 500 IDs to avoid unbounded growth
-    trimmed = list(seen)[-500:]
+    trimmed = list(seen)[-SEEN_MAX_SIZE:]
     with open(SEEN_FILE, "w") as f:
         json.dump(trimmed, f)
 
@@ -103,6 +113,15 @@ def save_settings(settings: dict) -> None:
 def get_active_handles(settings: dict) -> list[str]:
     disabled = set(settings.get("disabled_writers", []))
     return [h for h in WRITER_HANDLES if h not in disabled]
+
+
+# ── Permission helpers ────────────────────────────────────────────────────────
+def _has_manage_guild(interaction: discord.Interaction) -> bool:
+    if interaction.guild is None:
+        return False
+    if not isinstance(interaction.user, discord.Member):
+        return False
+    return interaction.user.guild_permissions.manage_guild
 
 
 # ── Embed builders ────────────────────────────────────────────────────────────
@@ -140,12 +159,11 @@ def news_embed(items: list[dict]) -> discord.Embed:
         timestamp=datetime.now(timezone.utc),
     )
     for item in items:
-        summary = item["summary"][:200] + "…" if len(item["summary"]) > 200 else item["summary"]
-        embed.add_field(
-            name=item["title"],
-            value=f"{summary}\n[Read more]({item['link']})" if item["link"] else summary,
-            inline=False,
-        )
+        summary = item.get("summary", "") or ""
+        summary = summary[:200] + "…" if len(summary) > 200 else summary
+        link = item.get("link") or ""
+        value = f"{summary}\n[Read more]({link})" if link else summary or "No summary available."
+        embed.add_field(name=item.get("title", "No title"), value=value, inline=False)
     embed.set_footer(text="Source: ESPN")
     return embed
 
@@ -153,22 +171,25 @@ def news_embed(items: list[dict]) -> discord.Embed:
 # ── Startup ───────────────────────────────────────────────────────────────────
 @bot.event
 async def on_ready():
-    print(f"✅ Logged in as {bot.user} (ID: {bot.user.id})")
-    try:
-        synced = await bot.tree.sync()
-        print(f"⚡ Synced {len(synced)} slash command(s)")
-    except Exception as e:
-        print(f"❌ Sync failed: {e}")
+    logger.info("Logged in as %s (ID: %s)", bot.user, bot.user.id)
+    if SYNC_COMMANDS:
+        try:
+            synced = await bot.tree.sync()
+            logger.info("Synced %s slash command(s)", len(synced))
+        except Exception as e:
+            logger.exception("Slash command sync failed: %s", e)
+    else:
+        logger.debug("SYNC_COMMANDS not set — skipping tree sync")
 
     if CHANNEL_ID:
         settings = load_settings()
         source = settings.get("source", "both")
         auto_post_espn.start()
         auto_post_bluesky.start()
-        print(f"⏱  ESPN loop: every {CHECK_INTERVAL_MINUTES} min | Bluesky loop: every 10 min")
-        print(f"📡 Active source: {source} → channel {CHANNEL_ID}")
+        logger.info("ESPN loop: every %s min | Bluesky loop: every 10 min", CHECK_INTERVAL_MINUTES)
+        logger.info("Active source: %s → channel %s", source, CHANNEL_ID)
     else:
-        print("⚠️  NEWS_CHANNEL_ID not set — auto-posting disabled")
+        logger.warning("NEWS_CHANNEL_ID not set — auto-posting disabled")
 
 
 # ── Scheduled tasks ───────────────────────────────────────────────────────────
@@ -180,7 +201,7 @@ async def auto_post_espn():
 
     channel = bot.get_channel(CHANNEL_ID)
     if not channel:
-        print(f"[espn] Channel {CHANNEL_ID} not found")
+        logger.warning("[espn] Channel %s not found", CHANNEL_ID)
         return
 
     seen = load_seen()
@@ -201,17 +222,16 @@ async def auto_post_espn():
             seen.add(item["id"])
             posted += 1
         except discord.HTTPException as e:
-            print(f"[espn] Send failed: {e}")
+            logger.warning("[espn] Send failed: %s", e)
 
-    # Mark all fetched transactions seen to avoid re-evaluating next cycle
     for t in all_transactions:
         seen.add(t["id"])
 
     save_seen(seen)
     if posted:
-        print(f"[espn] Posted {posted} transaction(s)")
+        logger.info("[espn] Posted %s transaction(s)", posted)
     else:
-        print("[espn] No new notable transactions")
+        logger.debug("[espn] No new notable transactions")
 
 
 @tasks.loop(minutes=10)
@@ -222,7 +242,7 @@ async def auto_post_bluesky():
 
     channel = bot.get_channel(CHANNEL_ID)
     if not channel:
-        print(f"[bluesky] Channel {CHANNEL_ID} not found")
+        logger.warning("[bluesky] Channel %s not found", CHANNEL_ID)
         return
 
     active_handles = get_active_handles(settings)
@@ -243,14 +263,14 @@ async def auto_post_bluesky():
             seen.add(post["id"])
             posted += 1
         except discord.HTTPException as e:
-            print(f"[bluesky] Send failed: {e}")
+            logger.warning("[bluesky] Send failed: %s", e)
 
     for post in bsky_posts:
         seen.add(post["id"])
 
     save_seen(seen)
     if posted:
-        print(f"[bluesky] Posted {posted} post(s)")
+        logger.info("[bluesky] Posted %s post(s)", posted)
 
 
 @auto_post_espn.before_loop
@@ -266,21 +286,13 @@ async def cmd_help(interaction: discord.Interaction):
         title="🏈 NFL Bot — Command Reference",
         color=discord.Color.from_str("#013369"),
     )
-    embed.add_field(
-        name="/transactions",
-        value="Latest 5 NFL transactions from ESPN.",
-        inline=False,
-    )
+    embed.add_field(name="/transactions", value="Latest 5 NFL transactions from ESPN.", inline=False)
     embed.add_field(
         name="/team `<name>`",
         value="Transactions for a specific team. Accepts full names, cities, or abbreviations (e.g. `Bears`, `CHI`, `Chicago`).",
         inline=False,
     )
-    embed.add_field(
-        name="/news",
-        value="Latest 5 NFL headlines from ESPN.",
-        inline=False,
-    )
+    embed.add_field(name="/news", value="Latest 5 NFL headlines from ESPN.", inline=False)
     embed.add_field(
         name="/source `<espn | bluesky | both>`",
         value="Set which source the auto-post loop pulls from. Persists across restarts.",
@@ -318,9 +330,7 @@ async def cmd_team(interaction: discord.Interaction, team: str):
         )
         return
     embeds = [transaction_embed(i, "") for i in items]
-    await interaction.followup.send(
-        content=f"**Transactions — {team.title()}**", embeds=embeds
-    )
+    await interaction.followup.send(content=f"**Transactions — {team.title()}**", embeds=embeds)
 
 
 @bot.tree.command(name="news", description="Get the latest NFL news headlines")
@@ -341,6 +351,11 @@ async def cmd_news(interaction: discord.Interaction):
     app_commands.Choice(name="Both", value="both"),
 ])
 async def cmd_source(interaction: discord.Interaction, source: str):
+    if not _has_manage_guild(interaction):
+        await interaction.response.send_message(
+            "⚠️ You need Manage Server permission to change the source.", ephemeral=True
+        )
+        return
     settings = load_settings()
     settings["source"] = source
     save_settings(settings)
@@ -357,7 +372,6 @@ async def cmd_writers(interaction: discord.Interaction, writer: str | None = Non
     settings = load_settings()
     disabled = set(settings.get("disabled_writers", []))
 
-    # No argument — show status of all writers
     if writer is None:
         embed = discord.Embed(
             title="🦋 Bluesky Beat Writers",
@@ -373,7 +387,6 @@ async def cmd_writers(interaction: discord.Interaction, writer: str | None = Non
         await interaction.response.send_message(embed=embed, ephemeral=True)
         return
 
-    # Toggle the selected writer
     if writer in disabled:
         disabled.discard(writer)
         action = "enabled"
@@ -383,7 +396,6 @@ async def cmd_writers(interaction: discord.Interaction, writer: str | None = Non
 
     settings["disabled_writers"] = list(disabled)
     save_settings(settings)
-
     display = WRITER_DISPLAY.get(writer, writer)
     icon = "✅" if action == "enabled" else "❌"
     await interaction.response.send_message(
