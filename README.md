@@ -2,7 +2,7 @@
 
 A Discord bot that tracks NFL transactions and news, posting them to your server automatically and on-demand via slash commands.
 
-**Data source:** ESPN's public APIs and RSS feed — no API key required.
+**Data sources:** ESPN public APIs/RSS (transactions & headlines) + Bluesky beat writers (breaking news) — no API keys required.
 
 ---
 
@@ -10,11 +10,16 @@ A Discord bot that tracks NFL transactions and news, posting them to your server
 
 | Feature | Details |
 |---|---|
-| `/transactions` | Latest NFL trades & roster moves |
+| `/transactions` | Latest NFL trades & roster moves (structured titles) |
 | `/team <name>` | Transactions filtered by team (e.g. `/team Bears`, `/team CHI`) |
 | `/news` | Latest NFL headlines from ESPN |
-| Auto-posting | Posts new transactions to a channel every 30 min (configurable) |
-| Deduplication | Tracks seen items so nothing gets posted twice |
+| `/source <espn\|bluesky\|both>` | Set which source the auto-post loop uses (requires Manage Server) |
+| `/writers [writer]` | View all Bluesky beat writers and toggle them on/off |
+| `/help` | Show all commands and usage |
+| ESPN auto-posting | Posts notable transactions every 30 min (configurable) |
+| Bluesky auto-posting | Posts beat writer updates every 10 min |
+| Deduplication | Tracks seen items — nothing gets posted twice |
+| Story deduplication | Only the first writer to break a story is posted |
 
 ---
 
@@ -51,20 +56,19 @@ cp .env.example .env
 # Edit .env and fill in DISCORD_TOKEN and NEWS_CHANNEL_ID
 ```
 
-### 4. Run
+### 4. First Run (register slash commands)
+
+```bash
+SYNC_COMMANDS=1 python bot.py
+```
+
+Slash commands may take up to 1 hour to appear globally, but will work immediately in your server.
+
+### 5. Subsequent Runs
 
 ```bash
 python bot.py
 ```
-
-You should see:
-```
-✅ Logged in as YourBot#1234 (ID: ...)
-⚡ Synced 3 slash command(s)
-⏱  Auto-posting to channel ... every 30 min
-```
-
-Slash commands may take up to 1 hour to appear globally, but will work immediately in your server.
 
 ---
 
@@ -76,7 +80,10 @@ Edit `.env` to change behavior:
 |---|---|---|
 | `DISCORD_TOKEN` | required | Your bot token |
 | `NEWS_CHANNEL_ID` | required | Channel for auto-posts |
-| `CHECK_INTERVAL_MINUTES` | `30` | How often to check for new transactions |
+| `CHECK_INTERVAL_MINUTES` | `30` | How often to check ESPN for new transactions |
+| `SYNC_COMMANDS` | `0` | Set to `1` on first run to register slash commands |
+
+Runtime settings (source, disabled writers) are stored in `settings.json` and persist across restarts.
 
 ---
 
@@ -84,22 +91,47 @@ Edit `.env` to change behavior:
 
 ```
 nfl-bot/
-├── bot.py              # Discord bot, slash commands, scheduled task
+├── bot.py              # Discord bot, slash commands, scheduled tasks
 ├── fetcher.py          # ESPN API + RSS data fetching
+├── filters.py          # Transaction importance filter (AAV, draft picks, etc.)
+├── title_parser.py     # Structured title extraction from raw ESPN descriptions
+├── bluesky.py          # Bluesky beat writer fetcher with story deduplication
 ├── requirements.txt
 ├── .env.example        # Rename to .env and fill in
-├── seen_ids.json       # Auto-created; tracks posted transactions
+├── seen_ids.json       # Auto-created; tracks posted item IDs
+├── settings.json       # Auto-created; stores source and writer toggle state
 └── README.md
 ```
+
+---
+
+## Beat Writers (Bluesky)
+
+The bot follows these NFL beat writers on Bluesky and posts their NFL-related updates every 10 minutes:
+
+- Ian Rapoport (NFL Network)
+- Dianna Russini (The Athletic)
+- Tom Pelissero (NFL Network)
+- Steve Wyche (NFL Network)
+- Kevin Seifert (ESPN)
+- Alaina Getzenberg (ESPN)
+- Marcel Louis-Jacques (ESPN)
+- Jamison Hensley (ESPN)
+- Jenna Laine (ESPN)
+- Ted Nguyen (The Athletic)
+- Mike Tanier (Freelance)
+- ProFootballTalk (NBC Sports)
+
+Use `/writers` in Discord to toggle any writer on or off. Use `/source` to switch between ESPN only, Bluesky only, or both.
 
 ---
 
 ## Extending It
 
 Some ideas for future additions:
+- **Add beat writers** — `/writers add <handle>` command to add new Bluesky accounts at runtime
 - **Injury reports** — ESPN has a public injuries endpoint: `site.api.espn.com/apis/site/v2/sports/football/nfl/injuries`
 - **Game scores** — `/scores` command using the ESPN scoreboard API
-- **Fantasy alerts** — Snap count and target share changes scraped from FantasyPros or PFF
 - **Daily digest** — A `/digest` command that summarizes all moves from the past 24 hours
 - **Persistent storage** — Swap `seen_ids.json` for SQLite with `aiosqlite` for more robust deduplication
 
