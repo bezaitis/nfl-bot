@@ -174,6 +174,11 @@ def get_writer_posts(
             continue
 
         for entry in data.get("feed", []):
+            # Skip reposts — reason field is set by Bluesky on reposted entries,
+            # meaning the original author is someone other than the tracked writer
+            if entry.get("reason"):
+                continue
+
             post = entry.get("post", {})
             record = post.get("record", {})
             text = record.get("text", "").strip()

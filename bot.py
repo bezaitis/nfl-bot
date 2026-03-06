@@ -3,14 +3,15 @@ bot.py — NFL Discord Bot
 --------------------------
 Slash commands:
   /help                — show all commands and usage
-  /transactions        — latest NFL transactions
   /team <name>         — transactions filtered by team
-  /news                — latest NFL headlines
+  /news [team]         — latest NFL headlines, optionally team-filtered
+  /player <name>       — NFL player profile with Spotrac link
   /source <source>     — set auto-post source (espn / bluesky / both)
-  /writers [writer]    — view or toggle individual Bluesky beat writers
+  /interval <minutes>  — set ESPN auto-post check frequency
+  /writers [writer]    — view or toggle Bluesky beat writers (with enable/disable all)
 
 Auto-posting:
-  ESPN transactions    — every 30 min (or CHECK_INTERVAL_MINUTES)
+  ESPN transactions    — every 30 min by default (adjustable via /interval)
   Bluesky beat writers — every 10 min (independent loop)
   Both loops deduplicate against seen_ids.json and respect the /source setting.
 
@@ -31,7 +32,7 @@ from discord import app_commands
 from discord.ext import commands, tasks
 from dotenv import load_dotenv
 
-from fetcher import get_news, get_transactions, get_all_transactions
+from fetcher import get_news, get_transactions, get_all_transactions, get_player
 from filters import is_notable_transaction
 from title_parser import build_structured_title
 from bluesky import get_writer_posts, WRITER_HANDLES
@@ -76,6 +77,9 @@ WRITER_DISPLAY = {
 }
 
 _WRITER_CHOICES = [
+    app_commands.Choice(name="✅ Enable All Writers", value="__all_on__"),
+    app_commands.Choice(name="❌ Disable All Writers", value="__all_off__"),
+] + [
     app_commands.Choice(name=display, value=handle)
     for handle, display in WRITER_DISPLAY.items()
 ]
@@ -152,9 +156,9 @@ def bluesky_embed(post: dict) -> discord.Embed:
     return embed
 
 
-def news_embed(items: list[dict]) -> discord.Embed:
+def news_embed(items: list[dict], title: str = "📰 Latest NFL News") -> discord.Embed:
     embed = discord.Embed(
-        title="📰 Latest NFL News",
+        title=title,
         color=discord.Color.from_str("#D50A0A"),  # NFL red
         timestamp=datetime.now(timezone.utc),
     )
@@ -165,6 +169,37 @@ def news_embed(items: list[dict]) -> discord.Embed:
         value = f"{summary}\n[Read more]({link})" if link else summary or "No summary available."
         embed.add_field(name=item.get("title", "No title"), value=value, inline=False)
     embed.set_footer(text="Source: ESPN")
+    return embed
+
+
+def player_embed(player: dict) -> discord.Embed:
+    embed = discord.Embed(
+        title=f"🏈 {player['name']}",
+        color=discord.Color.from_str("#013369"),
+        timestamp=datetime.now(timezone.utc),
+    )
+    if player.get("position"):
+        embed.add_field(name="Position", value=player["position"], inline=True)
+    if player.get("team"):
+        embed.add_field(name="Team", value=player["team"], inline=True)
+    if player.get("jersey"):
+        embed.add_field(name="Jersey", value=f"#{player['jersey']}", inline=True)
+    if player.get("height") or player.get("weight"):
+        size = " / ".join(filter(None, [player.get("height"), player.get("weight")]))
+        embed.add_field(name="Size", value=size, inline=True)
+    if player.get("age"):
+        embed.add_field(name="Age", value=str(player["age"]), inline=True)
+    if player.get("experience"):
+        embed.add_field(name="Experience", value=player["experience"], inline=True)
+    if player.get("status"):
+        embed.add_field(name="Status", value=player["status"], inline=True)
+    if player.get("spotrac_url"):
+        embed.add_field(
+            name="Contract Info",
+            value=f"[View on Spotrac]({player['spotrac_url']})",
+            inline=False,
+        )
+    embed.set_footer(text="Source: ESPN · Contract data via Spotrac")
     return embed
 
 
@@ -184,9 +219,12 @@ async def on_ready():
     if CHANNEL_ID:
         settings = load_settings()
         source = settings.get("source", "both")
+        saved_interval = settings.get("espn_interval", CHECK_INTERVAL_MINUTES)
+        if saved_interval != CHECK_INTERVAL_MINUTES:
+            auto_post_espn.change_interval(minutes=saved_interval)
         auto_post_espn.start()
         auto_post_bluesky.start()
-        logger.info("ESPN loop: every %s min | Bluesky loop: every 10 min", CHECK_INTERVAL_MINUTES)
+        logger.info("ESPN loop: every %s min | Bluesky loop: every 10 min", saved_interval)
         logger.info("Active source: %s → channel %s", source, CHANNEL_ID)
     else:
         logger.warning("NEWS_CHANNEL_ID not set — auto-posting disabled")
@@ -286,36 +324,38 @@ async def cmd_help(interaction: discord.Interaction):
         title="🏈 NFL Bot — Command Reference",
         color=discord.Color.from_str("#013369"),
     )
-    embed.add_field(name="/transactions", value="Latest 5 NFL transactions from ESPN.", inline=False)
     embed.add_field(
         name="/team `<name>`",
-        value="Transactions for a specific team. Accepts full names, cities, or abbreviations (e.g. `Bears`, `CHI`, `Chicago`).",
+        value="Latest ESPN transactions for a specific team. Accepts full names, cities, or abbreviations (e.g. `Bears`, `CHI`, `Chicago`).",
         inline=False,
     )
-    embed.add_field(name="/news", value="Latest 5 NFL headlines from ESPN.", inline=False)
+    embed.add_field(
+        name="/news `[team]`",
+        value="Latest NFL headlines from ESPN. Pass a team name to filter (e.g. `/news Bears`).",
+        inline=False,
+    )
+    embed.add_field(
+        name="/player `<name>`",
+        value="NFL player profile — position, team, size, experience, and a link to their Spotrac contract page.",
+        inline=False,
+    )
     embed.add_field(
         name="/source `<espn | bluesky | both>`",
         value="Set which source the auto-post loop pulls from. Persists across restarts.",
         inline=False,
     )
     embed.add_field(
-        name="/writers `[writer]`",
-        value="View all Bluesky beat writers and their status. Pass a writer to toggle them on or off.",
+        name="/interval `<minutes>`",
+        value="Set how often the ESPN loop checks for new transactions (10 / 30 / 60 / 120 min). Persists across restarts.",
         inline=False,
     )
-    embed.set_footer(text=f"Auto-post: ESPN every {CHECK_INTERVAL_MINUTES} min · Bluesky every 10 min")
+    embed.add_field(
+        name="/writers `[writer]`",
+        value="View all Bluesky beat writers and their status. Pass a writer to toggle, or choose Enable All / Disable All.",
+        inline=False,
+    )
+    embed.set_footer(text="Auto-post: ESPN interval adjustable · Bluesky every 10 min")
     await interaction.response.send_message(embed=embed, ephemeral=True)
-
-
-@bot.tree.command(name="transactions", description="Get the latest NFL transactions")
-async def cmd_transactions(interaction: discord.Interaction):
-    await interaction.response.defer()
-    items = get_transactions(limit=5)
-    if not items:
-        await interaction.followup.send("⚠️ No recent transactions found. Try again shortly.")
-        return
-    embeds = [transaction_embed(i, "") for i in items]
-    await interaction.followup.send(content="**Latest NFL Transactions**", embeds=embeds)
 
 
 @bot.tree.command(name="team", description="Get transactions for a specific NFL team")
@@ -334,13 +374,20 @@ async def cmd_team(interaction: discord.Interaction, team: str):
 
 
 @bot.tree.command(name="news", description="Get the latest NFL news headlines")
-async def cmd_news(interaction: discord.Interaction):
+@app_commands.describe(team="Optional team filter (e.g. Bears, CHI, Chicago)")
+async def cmd_news(interaction: discord.Interaction, team: str | None = None):
     await interaction.response.defer()
-    items = get_news(limit=5)
+    items = get_news(limit=10, team_filter=team)
     if not items:
-        await interaction.followup.send("⚠️ No news found. Try again shortly.")
+        msg = (
+            f"⚠️ No recent news found for **{team}**. Try a different spelling or check back later."
+            if team else
+            "⚠️ No news found. Try again shortly."
+        )
+        await interaction.followup.send(msg)
         return
-    await interaction.followup.send(embed=news_embed(items))
+    title = f"📰 Latest NFL News — {team.title()}" if team else "📰 Latest NFL News"
+    await interaction.followup.send(embed=news_embed(items[:5], title=title))
 
 
 @bot.tree.command(name="source", description="Set the auto-post news source")
@@ -365,13 +412,37 @@ async def cmd_source(interaction: discord.Interaction, source: str):
     )
 
 
+@bot.tree.command(name="interval", description="Set how often the ESPN auto-post loop checks for new transactions")
+@app_commands.describe(minutes="Check interval in minutes")
+@app_commands.choices(minutes=[
+    app_commands.Choice(name="10 minutes", value=10),
+    app_commands.Choice(name="30 minutes (default)", value=30),
+    app_commands.Choice(name="60 minutes", value=60),
+    app_commands.Choice(name="120 minutes", value=120),
+])
+async def cmd_interval(interaction: discord.Interaction, minutes: int):
+    if not _has_manage_guild(interaction):
+        await interaction.response.send_message(
+            "⚠️ You need Manage Server permission to change the interval.", ephemeral=True
+        )
+        return
+    settings = load_settings()
+    settings["espn_interval"] = minutes
+    save_settings(settings)
+    auto_post_espn.change_interval(minutes=minutes)
+    await interaction.response.send_message(
+        f"✅ ESPN auto-post interval set to **{minutes} minutes**.", ephemeral=True
+    )
+
+
 @bot.tree.command(name="writers", description="View or toggle Bluesky beat writers")
-@app_commands.describe(writer="Writer to toggle on/off (omit to view all)")
+@app_commands.describe(writer="Writer to toggle, Enable All, or Disable All (omit to view all)")
 @app_commands.choices(writer=_WRITER_CHOICES)
 async def cmd_writers(interaction: discord.Interaction, writer: str | None = None):
     settings = load_settings()
     disabled = set(settings.get("disabled_writers", []))
 
+    # View all — no permission required
     if writer is None:
         embed = discord.Embed(
             title="🦋 Bluesky Beat Writers",
@@ -383,10 +454,30 @@ async def cmd_writers(interaction: discord.Interaction, writer: str | None = Non
             display = WRITER_DISPLAY.get(handle, handle)
             lines.append(f"{status} {display}")
         embed.description = "\n".join(lines)
-        embed.set_footer(text="Use /writers <name> to toggle a writer on or off")
+        embed.set_footer(text="Use /writers <name> to toggle · Enable All / Disable All available")
         await interaction.response.send_message(embed=embed, ephemeral=True)
         return
 
+    # All toggle actions require Manage Server
+    if not _has_manage_guild(interaction):
+        await interaction.response.send_message(
+            "⚠️ You need Manage Server permission to toggle writers.", ephemeral=True
+        )
+        return
+
+    # Enable / disable all
+    if writer == "__all_on__":
+        settings["disabled_writers"] = []
+        save_settings(settings)
+        await interaction.response.send_message("✅ All writers enabled.", ephemeral=True)
+        return
+    if writer == "__all_off__":
+        settings["disabled_writers"] = list(WRITER_HANDLES)
+        save_settings(settings)
+        await interaction.response.send_message("❌ All writers disabled.", ephemeral=True)
+        return
+
+    # Toggle individual writer
     if writer in disabled:
         disabled.discard(writer)
         action = "enabled"
@@ -401,6 +492,20 @@ async def cmd_writers(interaction: discord.Interaction, writer: str | None = Non
     await interaction.response.send_message(
         f"{icon} **{display}** has been **{action}**.", ephemeral=True
     )
+
+
+@bot.tree.command(name="player", description="Look up an NFL player profile")
+@app_commands.describe(name="Player name (e.g. Ja'Marr Chase, Patrick Mahomes)")
+async def cmd_player(interaction: discord.Interaction, name: str):
+    await interaction.response.defer()
+    player = get_player(name)
+    if not player:
+        await interaction.followup.send(
+            f"⚠️ Could not find **{name}**. Check the spelling and try again.",
+            ephemeral=True,
+        )
+        return
+    await interaction.followup.send(embed=player_embed(player))
 
 
 # ── Run ───────────────────────────────────────────────────────────────────────

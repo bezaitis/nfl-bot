@@ -4,6 +4,8 @@ No API key required.
 """
 
 import hashlib
+import urllib.parse
+
 import feedparser
 import requests
 
@@ -12,6 +14,7 @@ ESPN_TRANSACTIONS_URL = (
     "?limit=50"
 )
 ESPN_NEWS_RSS = "https://www.espn.com/espn/rss/nfl/news"
+ESPN_ATHLETES_URL = "https://sports.core.api.espn.com/v2/sports/football/leagues/nfl/athletes"
 
 # Map of common team name variants → normalized lowercase
 TEAM_ALIASES = {
@@ -141,23 +144,88 @@ def get_transactions(limit: int = 8, team_filter: str | None = None) -> list[dic
     return items
 
 
-def get_news(limit: int = 5) -> list[dict]:
+def get_news(limit: int = 5, team_filter: str | None = None) -> list[dict]:
     """
     Fetch latest NFL headlines from ESPN's RSS feed.
+    Optionally filter by team name/abbreviation (client-side).
     Returns a list of dicts: {title, link, summary}
     """
     try:
         feed = feedparser.parse(ESPN_NEWS_RSS)
+        normalized = _normalize_team(team_filter) if team_filter else None
         items = []
-        for entry in feed.entries[:limit]:
+        for entry in feed.entries:
+            title = entry.get("title", "No title")
+            summary = entry.get("summary", "")
+            if normalized:
+                searchable = (title + " " + summary).lower()
+                if normalized not in searchable:
+                    continue
             items.append(
                 {
-                    "title": entry.get("title", "No title"),
+                    "title": title,
                     "link": entry.get("link", ""),
-                    "summary": entry.get("summary", ""),
+                    "summary": summary,
                 }
             )
+            if len(items) >= limit:
+                break
         return items
     except Exception as e:
         print(f"[fetcher] News RSS fetch failed: {e}")
         return []
+
+
+def get_player(name: str) -> dict | None:
+    """
+    Look up an NFL player by name via ESPN's public athlete API.
+    Returns a dict with profile data and a Spotrac search link, or None if not found.
+    """
+    try:
+        resp = requests.get(
+            ESPN_ATHLETES_URL,
+            params={"limit": 5, "active": "true", "q": name},
+            timeout=10,
+        )
+        resp.raise_for_status()
+        athletes = resp.json().get("items", [])
+        if not athletes:
+            return None
+
+        ref_url = athletes[0].get("$ref", "")
+        if not ref_url:
+            return None
+
+        athlete_resp = requests.get(ref_url, timeout=10)
+        athlete_resp.raise_for_status()
+        athlete = athlete_resp.json()
+
+        # Resolve team name from $ref if needed
+        team_name = ""
+        team_ref = athlete.get("team", {})
+        if isinstance(team_ref, dict):
+            if "$ref" in team_ref:
+                try:
+                    team_data = requests.get(team_ref["$ref"], timeout=6).json()
+                    team_name = team_data.get("displayName", "")
+                except Exception:
+                    pass
+            else:
+                team_name = team_ref.get("displayName", "")
+
+        display_name = athlete.get("displayName", name)
+        return {
+            "name": display_name,
+            "position": athlete.get("position", {}).get("abbreviation", ""),
+            "team": team_name,
+            "jersey": athlete.get("jersey", ""),
+            "age": athlete.get("age", ""),
+            "experience": athlete.get("experience", {}).get("displayValue", ""),
+            "status": athlete.get("status", {}).get("name", ""),
+            "height": athlete.get("displayHeight", ""),
+            "weight": athlete.get("displayWeight", ""),
+            "spotrac_url": "https://www.spotrac.com/nfl/search/?q=" + urllib.parse.quote(display_name),
+        }
+    except Exception as e:
+        print(f"[fetcher] Player lookup failed for '{name}': {e}")
+        return None
