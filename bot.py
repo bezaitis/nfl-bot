@@ -199,6 +199,8 @@ def player_embed(player: dict) -> discord.Embed:
             value=f"[View on Spotrac]({player['spotrac_url']})",
             inline=False,
         )
+    if player.get("headshot"):
+        embed.set_thumbnail(url=player["headshot"])
     embed.set_footer(text="Source: ESPN · Contract data via Spotrac")
     return embed
 

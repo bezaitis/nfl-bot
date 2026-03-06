@@ -5,6 +5,7 @@ No API key required.
 
 import hashlib
 import urllib.parse
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import feedparser
 import requests
@@ -14,7 +15,7 @@ ESPN_TRANSACTIONS_URL = (
     "?limit=50"
 )
 ESPN_NEWS_RSS = "https://www.espn.com/espn/rss/nfl/news"
-ESPN_ATHLETES_URL = "https://sports.core.api.espn.com/v2/sports/football/leagues/nfl/athletes"
+ESPN_TEAMS_URL = "https://site.api.espn.com/apis/site/v2/sports/football/nfl/teams"
 
 # Map of common team name variants → normalized lowercase
 TEAM_ALIASES = {
@@ -178,54 +179,61 @@ def get_news(limit: int = 5, team_filter: str | None = None) -> list[dict]:
 
 def get_player(name: str) -> dict | None:
     """
-    Look up an NFL player by name via ESPN's public athlete API.
-    Returns a dict with profile data and a Spotrac search link, or None if not found.
+    Look up an NFL player by name by searching all 32 team rosters in parallel.
+    ESPN's athlete search API ignores the name query, so roster search is the
+    only reliable approach. Returns a dict with profile data, headshot URL, and
+    a Spotrac search link, or None if not found.
     """
     try:
-        resp = requests.get(
-            ESPN_ATHLETES_URL,
-            params={"limit": 5, "active": "true", "q": name},
-            timeout=10,
-        )
-        resp.raise_for_status()
-        athletes = resp.json().get("items", [])
-        if not athletes:
+        teams_resp = requests.get(ESPN_TEAMS_URL, params={"limit": 32}, timeout=10)
+        teams_resp.raise_for_status()
+        teams = [
+            (t["team"]["id"], t["team"]["displayName"])
+            for t in teams_resp.json().get("sports", [{}])[0].get("leagues", [{}])[0].get("teams", [])
+        ]
+
+        name_lower = name.lower().strip()
+
+        def fetch_and_search(team_id, team_name):
+            try:
+                resp = requests.get(
+                    f"{ESPN_TEAMS_URL}/{team_id}/roster",
+                    timeout=10,
+                )
+                resp.raise_for_status()
+                for group in resp.json().get("athletes", []):
+                    for a in group.get("items", []):
+                        if name_lower in a.get("fullName", "").lower():
+                            a["_team_name"] = team_name
+                            return a
+            except Exception:
+                pass
             return None
 
-        ref_url = athletes[0].get("$ref", "")
-        if not ref_url:
-            return None
+        with ThreadPoolExecutor(max_workers=16) as executor:
+            futures = [executor.submit(fetch_and_search, tid, tname) for tid, tname in teams]
+            for future in as_completed(futures):
+                result = future.result()
+                if result:
+                    a = result
+                    display_name = a.get("displayName", name)
+                    exp_years = a.get("experience", {}).get("years")
+                    experience = f"{exp_years} yr{'s' if exp_years != 1 else ''}" if exp_years is not None else ""
+                    return {
+                        "name": display_name,
+                        "position": a.get("position", {}).get("abbreviation", ""),
+                        "team": a.get("_team_name", ""),
+                        "jersey": a.get("jersey", ""),
+                        "age": a.get("age", ""),
+                        "experience": experience,
+                        "status": a.get("status", {}).get("name", ""),
+                        "height": a.get("displayHeight", ""),
+                        "weight": a.get("displayWeight", ""),
+                        "headshot": a.get("headshot", {}).get("href", ""),
+                        "spotrac_url": "https://www.spotrac.com/nfl/search/?q=" + urllib.parse.quote(display_name),
+                    }
 
-        athlete_resp = requests.get(ref_url, timeout=10)
-        athlete_resp.raise_for_status()
-        athlete = athlete_resp.json()
-
-        # Resolve team name from $ref if needed
-        team_name = ""
-        team_ref = athlete.get("team", {})
-        if isinstance(team_ref, dict):
-            if "$ref" in team_ref:
-                try:
-                    team_data = requests.get(team_ref["$ref"], timeout=6).json()
-                    team_name = team_data.get("displayName", "")
-                except Exception:
-                    pass
-            else:
-                team_name = team_ref.get("displayName", "")
-
-        display_name = athlete.get("displayName", name)
-        return {
-            "name": display_name,
-            "position": athlete.get("position", {}).get("abbreviation", ""),
-            "team": team_name,
-            "jersey": athlete.get("jersey", ""),
-            "age": athlete.get("age", ""),
-            "experience": athlete.get("experience", {}).get("displayValue", ""),
-            "status": athlete.get("status", {}).get("name", ""),
-            "height": athlete.get("displayHeight", ""),
-            "weight": athlete.get("displayWeight", ""),
-            "spotrac_url": "https://www.spotrac.com/nfl/search/?q=" + urllib.parse.quote(display_name),
-        }
+        return None
     except Exception as e:
         print(f"[fetcher] Player lookup failed for '{name}': {e}")
         return None
