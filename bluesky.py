@@ -32,23 +32,68 @@ WRITER_HANDLES: list[str] = [
     "tompelissero.bsky.social",    # Tom Pelissero — NFL Network
 ]
 
-# Keywords that signal an NFL-relevant post
-_NFL_KEYWORDS = frozenset({
-    "signed", "signing", "sign", "trade", "traded", "released", "cut",
-    "waived", "extension", "deal", "contract", "injury", "injured", "ir",
-    "injured reserve", "reserve", "draft", "free agent", "pickup",
-    "claim", "waiver", "activated", "restructured", "void", "retired",
-    "retirement", "franchise tag", "tagged",
+# ── Relevance filtering ───────────────────────────────────────────────────────
+
+# Strong signals: almost always indicate a real transaction occurred
+_STRONG_KEYWORDS = frozenset({
+    "signed", "signing", "signs",
+    "traded", "trades",
+    "released", "releases",
+    "waived", "waives", "waiver",
+    "extension",
+    "restructured", "restructure", "restructures",
+    "injured", "injury",
+    "ir", "injured reserve",
+    "activated", "activates",
+    "void",
+    "retired", "retirement", "retires",
+    "franchise tag", "tagged",
+    "claim", "claimed", "pickup",
+    "deal",
 })
 
+# Weak signals: can also appear in opinion or analysis pieces
+_WEAK_KEYWORDS = frozenset({
+    "contract", "trade", "draft", "reserve", "sign", "free agent", "cut",
+})
+
+
+def _build_kw_re(kw_set: frozenset) -> re.Pattern:
+    alts = "|".join(re.escape(k) for k in sorted(kw_set, key=len, reverse=True))
+    return re.compile(r"\b(?:" + alts + r")\b", re.IGNORECASE)
+
+
+_STRONG_KW_RE = _build_kw_re(_STRONG_KEYWORDS)
+_WEAK_KW_RE   = _build_kw_re(_WEAK_KEYWORDS)
+
+# Sourcing or financial language that corroborates a weak-keyword match
+_SOURCE_RE = re.compile(
+    r"sources?|per\s|\$\d|million|\baav\b|agreed\s+to|\d-year|one-year|multi-year",
+    re.IGNORECASE,
+)
+
+# Hypothetical/opinion phrasing — disqualifies a post even with strong keywords present
+_OPINION_RE = re.compile(
+    r"\b(?:should|could|would|might)\s+(?:have\s+)?(?:traded?|cuts?|signed?|drafted?|released?|waived?|tagged)\b",
+    re.IGNORECASE,
+)
 
 _NAME_RE = re.compile(r"\b([A-Z][a-z']+(?:\s[A-Z][a-z']+)+)\b")
 STORY_WINDOW_MINUTES = 30  # Posts within this window sharing a name = same story
 
 
 def _is_nfl_relevant(text: str) -> bool:
-    lower = text.lower()
-    return any(kw in lower for kw in _NFL_KEYWORDS)
+    """Return True if this post looks like actual NFL transaction news, not opinion or analysis."""
+    # Disqualify hypothetical/opinion phrasing up front
+    if _OPINION_RE.search(text):
+        return False
+    # Strong keyword → pass immediately
+    if _STRONG_KW_RE.search(text):
+        return True
+    # Weak keyword only → require sourcing or financial corroboration
+    if _WEAK_KW_RE.search(text):
+        return bool(_SOURCE_RE.search(text))
+    return False
 
 
 def _extract_name_tokens(text: str) -> frozenset[str]:
