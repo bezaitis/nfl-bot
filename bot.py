@@ -11,7 +11,7 @@ Slash commands:
   /writers [writer]    — view or toggle Bluesky beat writers (with enable/disable all)
 
 Auto-posting:
-  ESPN transactions    — every 30 min by default (adjustable via /interval)
+  ESPN news stories    — every 30 min by default (adjustable via /interval)
   Bluesky beat writers — every 10 min (independent loop)
   Both loops deduplicate against seen_ids.json and respect the /source setting.
 
@@ -32,8 +32,8 @@ from discord import app_commands
 from discord.ext import commands, tasks
 from dotenv import load_dotenv
 
-from fetcher import get_news, get_transactions, get_all_transactions, get_player
-from filters import is_notable_transaction
+from fetcher import get_news, get_transactions, get_all_news, get_player
+from filters import is_notable_news
 from title_parser import build_structured_title
 from bluesky import get_writer_posts, WRITER_HANDLES
 
@@ -156,6 +156,21 @@ def bluesky_embed(post: dict) -> discord.Embed:
     return embed
 
 
+def news_story_embed(item: dict, reason: str = "") -> discord.Embed:
+    summary = (item.get("summary") or "")[:300]
+    embed = discord.Embed(
+        title=item.get("title", "NFL News"),
+        url=item.get("link") or None,
+        description=summary,
+        color=discord.Color.from_str("#D50A0A"),
+        timestamp=datetime.now(timezone.utc),
+    )
+    if reason:
+        embed.set_author(name=reason)
+    embed.set_footer(text="Source: ESPN")
+    return embed
+
+
 def news_embed(items: list[dict], title: str = "📰 Latest NFL News") -> discord.Embed:
     embed = discord.Embed(
         title=title,
@@ -193,15 +208,15 @@ def player_embed(player: dict) -> discord.Embed:
         embed.add_field(name="Experience", value=player["experience"], inline=True)
     if player.get("status"):
         embed.add_field(name="Status", value=player["status"], inline=True)
-    if player.get("spotrac_url"):
+    if player.get("espn_url"):
         embed.add_field(
-            name="Contract Info",
-            value=f"[View on Spotrac]({player['spotrac_url']})",
+            name="Profile",
+            value=f"[View on ESPN]({player['espn_url']})",
             inline=False,
         )
     if player.get("headshot"):
         embed.set_thumbnail(url=player["headshot"])
-    embed.set_footer(text="Source: ESPN · Contract data via Spotrac")
+    embed.set_footer(text="Source: ESPN")
     return embed
 
 
@@ -226,7 +241,7 @@ async def on_ready():
             auto_post_espn.change_interval(minutes=saved_interval)
         auto_post_espn.start()
         auto_post_bluesky.start()
-        logger.info("ESPN loop: every %s min | Bluesky loop: every 10 min", saved_interval)
+        logger.info("ESPN news loop: every %s min | Bluesky loop: every 10 min", saved_interval)
         logger.info("Active source: %s → channel %s", source, CHANNEL_ID)
     else:
         logger.warning("NEWS_CHANNEL_ID not set — auto-posting disabled")
@@ -245,33 +260,33 @@ async def auto_post_espn():
         return
 
     seen = load_seen()
-    all_transactions = get_all_transactions(limit=50)
+    all_news = get_all_news(limit=50)
 
     notable = []
-    for t in all_transactions:
-        if t["id"] in seen:
+    for item in all_news:
+        if item["id"] in seen:
             continue
-        should_post, reason = is_notable_transaction(t)
+        should_post, reason = is_notable_news(item)
         if should_post:
-            notable.append((t, reason))
+            notable.append((item, reason))
 
     posted = 0
     for item, reason in notable[:5]:
         try:
-            await channel.send(embed=transaction_embed(item, reason))
+            await channel.send(embed=news_story_embed(item, reason))
             seen.add(item["id"])
             posted += 1
         except discord.HTTPException as e:
             logger.warning("[espn] Send failed: %s", e)
 
-    for t in all_transactions:
-        seen.add(t["id"])
+    for item in all_news:
+        seen.add(item["id"])
 
     save_seen(seen)
     if posted:
-        logger.info("[espn] Posted %s transaction(s)", posted)
+        logger.info("[espn] Posted %s news story(s)", posted)
     else:
-        logger.debug("[espn] No new notable transactions")
+        logger.debug("[espn] No new notable stories")
 
 
 @tasks.loop(minutes=10)
@@ -348,7 +363,7 @@ async def cmd_help(interaction: discord.Interaction):
     )
     embed.add_field(
         name="/interval `<minutes>`",
-        value="Set how often the ESPN loop checks for new transactions (10 / 30 / 60 / 120 min). Persists across restarts.",
+        value="Set how often the ESPN loop checks for new news stories (10 / 30 / 60 / 120 min). Persists across restarts.",
         inline=False,
     )
     embed.add_field(

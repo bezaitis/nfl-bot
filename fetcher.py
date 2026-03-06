@@ -4,7 +4,6 @@ No API key required.
 """
 
 import hashlib
-import urllib.parse
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import feedparser
@@ -145,6 +144,33 @@ def get_transactions(limit: int = 8, team_filter: str | None = None) -> list[dic
     return items
 
 
+def get_all_news(limit: int = 50) -> list[dict]:
+    """
+    Fetch ESPN NFL news RSS items with stable IDs.
+    Used by the auto-post loop — no filtering applied.
+    """
+    try:
+        feed = feedparser.parse(ESPN_NEWS_RSS)
+        items = []
+        for entry in feed.entries:
+            title = entry.get("title", "")
+            link = entry.get("link", "")
+            summary = entry.get("summary", "")
+            uid = hashlib.md5((link or title).encode()).hexdigest()
+            items.append({
+                "id": uid,
+                "title": title,
+                "link": link,
+                "summary": summary,
+            })
+            if len(items) >= limit:
+                break
+        return items
+    except Exception as e:
+        print(f"[fetcher] News RSS fetch failed: {e}")
+        return []
+
+
 def get_news(limit: int = 5, team_filter: str | None = None) -> list[dict]:
     """
     Fetch latest NFL headlines from ESPN's RSS feed.
@@ -230,7 +256,7 @@ def get_player(name: str) -> dict | None:
                         "height": a.get("displayHeight", ""),
                         "weight": a.get("displayWeight", ""),
                         "headshot": a.get("headshot", {}).get("href", ""),
-                        "spotrac_url": "https://www.spotrac.com/nfl/search/?q=" + urllib.parse.quote(display_name),
+                        "espn_url": f"https://www.espn.com/nfl/player/_/id/{a.get('id', '')}",
                     }
 
         return None

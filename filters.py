@@ -313,6 +313,26 @@ def is_big_signing(item: dict) -> tuple[bool, str]:
     return False, ""
 
 
+# ── News filter ───────────────────────────────────────────────────────────────
+
+def is_notable_news(item: dict) -> tuple[bool, str]:
+    """
+    Returns (should_post, reason) for an ESPN RSS news item.
+    Checks title + summary for Bears mentions, draft picks, and prominent players.
+    """
+    proxy = {
+        "description": (item.get("title", "") + " " + item.get("summary", "")).strip(),
+        "team": "",
+    }
+    if involves_chicago(proxy):
+        return True, "🐻 Bears news"
+    if involves_draft_pick(proxy):
+        return True, "📋 Draft pick"
+    if involves_prominent_player(proxy):
+        return True, "⭐ Notable player"
+    return False, ""
+
+
 # ── Master filter ─────────────────────────────────────────────────────────────
 
 def is_notable_transaction(item: dict) -> tuple[bool, str]:
