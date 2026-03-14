@@ -22,6 +22,7 @@ Setup:
   4. python bot.py                   ← subsequent runs
 """
 
+import asyncio
 import json
 import logging
 import os
@@ -50,7 +51,7 @@ logger = logging.getLogger("nfl-bot")
 # ── Config ────────────────────────────────────────────────────────────────────
 TOKEN = os.getenv("DISCORD_TOKEN")
 CHANNEL_ID = int(os.getenv("NEWS_CHANNEL_ID", "0"))
-CHECK_INTERVAL_MINUTES = int(os.getenv("CHECK_INTERVAL_MINUTES", "30"))
+CHECK_INTERVAL_MINUTES = int(os.getenv("CHECK_INTERVAL_MINUTES", "1"))
 SYNC_COMMANDS = os.getenv("SYNC_COMMANDS", "0").strip().lower() in ("1", "true", "yes")
 SEEN_FILE = "seen_ids.json"
 SETTINGS_FILE = "settings.json"
@@ -260,7 +261,11 @@ async def auto_post_espn():
         return
 
     seen = load_seen()
-    all_news = get_all_news(limit=50)
+    all_news = await asyncio.to_thread(get_all_news, 50)
+
+    if not all_news:
+        logger.warning("[espn] Feed fetch returned empty — skipping this cycle")
+        return
 
     notable = []
     for item in all_news:
@@ -305,7 +310,11 @@ async def auto_post_bluesky():
         return
 
     seen = load_seen()
-    bsky_posts = get_writer_posts(handles=active_handles)
+    bsky_posts = await asyncio.to_thread(get_writer_posts, active_handles)
+
+    if not bsky_posts:
+        logger.warning("[bluesky] Feed fetch returned empty — skipping this cycle")
+        return
 
     posted = 0
     for post in bsky_posts:
@@ -432,8 +441,9 @@ async def cmd_source(interaction: discord.Interaction, source: str):
 @bot.tree.command(name="interval", description="Set how often the ESPN auto-post loop checks for new transactions")
 @app_commands.describe(minutes="Check interval in minutes")
 @app_commands.choices(minutes=[
+    app_commands.Choice(name="1 minute (debug)", value=1),
     app_commands.Choice(name="10 minutes", value=10),
-    app_commands.Choice(name="30 minutes (default)", value=30),
+    app_commands.Choice(name="30 minutes", value=30),
     app_commands.Choice(name="60 minutes", value=60),
     app_commands.Choice(name="120 minutes", value=120),
 ])

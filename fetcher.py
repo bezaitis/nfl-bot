@@ -4,10 +4,25 @@ No API key required.
 """
 
 import hashlib
+import io
+import logging
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import feedparser
 import requests
+
+logger = logging.getLogger("nfl-bot.fetcher")
+
+_ESPN_HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/124.0.0.0 Safari/537.36"
+    ),
+    "Accept": "application/rss+xml, application/xml, text/xml, */*",
+    "Cache-Control": "no-cache",
+    "Pragma": "no-cache",
+}
 
 ESPN_TRANSACTIONS_URL = (
     "https://sports.core.api.espn.com/v2/sports/football/leagues/nfl/transactions"
@@ -65,11 +80,12 @@ def get_all_transactions(limit: int = 50) -> list[dict]:
     Used by the auto-post loop, which passes items through filters.py.
     """
     try:
-        resp = requests.get(ESPN_TRANSACTIONS_URL, timeout=10)
+        resp = requests.get(ESPN_TRANSACTIONS_URL, headers=_ESPN_HEADERS, timeout=10)
         resp.raise_for_status()
         data = resp.json()
+        logger.debug("[espn] Transactions fetch OK — HTTP %s", resp.status_code)
     except Exception as e:
-        print(f"[fetcher] Transaction fetch failed: {e}")
+        logger.warning("[espn] Transaction fetch failed: %s", e)
         return []
 
     items = []
@@ -101,11 +117,12 @@ def get_transactions(limit: int = 8, team_filter: str | None = None) -> list[dic
     Returns a list of dicts: {id, title, description, team}
     """
     try:
-        resp = requests.get(ESPN_TRANSACTIONS_URL, timeout=10)
+        resp = requests.get(ESPN_TRANSACTIONS_URL, headers=_ESPN_HEADERS, timeout=10)
         resp.raise_for_status()
         data = resp.json()
+        logger.debug("[espn] Transactions fetch OK — HTTP %s", resp.status_code)
     except Exception as e:
-        print(f"[fetcher] Transaction fetch failed: {e}")
+        logger.warning("[espn] Transaction fetch failed: %s", e)
         return []
 
     normalized_filter = _normalize_team(team_filter) if team_filter else None
@@ -144,13 +161,34 @@ def get_transactions(limit: int = 8, team_filter: str | None = None) -> list[dic
     return items
 
 
+def _fetch_rss_feed() -> feedparser.FeedParserDict | None:
+    """
+    Fetch ESPN's NFL RSS feed using requests (controlled timeout + headers),
+    then parse the raw content offline via feedparser. Returns None on failure.
+    """
+    try:
+        resp = requests.get(ESPN_NEWS_RSS, headers=_ESPN_HEADERS, timeout=15)
+        resp.raise_for_status()
+        if not resp.content:
+            logger.warning("[espn] News RSS returned empty body (HTTP %s)", resp.status_code)
+            return None
+        feed = feedparser.parse(io.BytesIO(resp.content))
+        logger.info("[espn] News RSS fetch OK — HTTP %s, %d entries", resp.status_code, len(feed.entries))
+        return feed
+    except Exception as e:
+        logger.warning("[espn] News RSS fetch failed: %s", e)
+        return None
+
+
 def get_all_news(limit: int = 50) -> list[dict]:
     """
     Fetch ESPN NFL news RSS items with stable IDs.
     Used by the auto-post loop — no filtering applied.
     """
+    feed = _fetch_rss_feed()
+    if feed is None:
+        return []
     try:
-        feed = feedparser.parse(ESPN_NEWS_RSS)
         items = []
         for entry in feed.entries:
             title = entry.get("title", "")
@@ -167,7 +205,7 @@ def get_all_news(limit: int = 50) -> list[dict]:
                 break
         return items
     except Exception as e:
-        print(f"[fetcher] News RSS fetch failed: {e}")
+        logger.warning("[espn] News RSS parse failed: %s", e)
         return []
 
 
@@ -177,8 +215,10 @@ def get_news(limit: int = 5, team_filter: str | None = None) -> list[dict]:
     Optionally filter by team name/abbreviation (client-side).
     Returns a list of dicts: {title, link, summary}
     """
+    feed = _fetch_rss_feed()
+    if feed is None:
+        return []
     try:
-        feed = feedparser.parse(ESPN_NEWS_RSS)
         normalized = _normalize_team(team_filter) if team_filter else None
         items = []
         for entry in feed.entries:
@@ -199,7 +239,7 @@ def get_news(limit: int = 5, team_filter: str | None = None) -> list[dict]:
                 break
         return items
     except Exception as e:
-        print(f"[fetcher] News RSS fetch failed: {e}")
+        logger.warning("[espn] News RSS parse failed: %s", e)
         return []
 
 
@@ -211,7 +251,7 @@ def get_player(name: str) -> dict | None:
     a Spotrac search link, or None if not found.
     """
     try:
-        teams_resp = requests.get(ESPN_TEAMS_URL, params={"limit": 32}, timeout=10)
+        teams_resp = requests.get(ESPN_TEAMS_URL, headers=_ESPN_HEADERS, params={"limit": 32}, timeout=10)
         teams_resp.raise_for_status()
         teams = [
             (t["team"]["id"], t["team"]["displayName"])
@@ -224,6 +264,7 @@ def get_player(name: str) -> dict | None:
             try:
                 resp = requests.get(
                     f"{ESPN_TEAMS_URL}/{team_id}/roster",
+                    headers=_ESPN_HEADERS,
                     timeout=10,
                 )
                 resp.raise_for_status()
@@ -261,5 +302,5 @@ def get_player(name: str) -> dict | None:
 
         return None
     except Exception as e:
-        print(f"[fetcher] Player lookup failed for '{name}': {e}")
+        logger.warning("[espn] Player lookup failed for '%s': %s", name, e)
         return None
