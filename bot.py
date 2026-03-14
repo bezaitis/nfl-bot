@@ -51,7 +51,7 @@ logger = logging.getLogger("nfl-bot")
 # ── Config ────────────────────────────────────────────────────────────────────
 TOKEN = os.getenv("DISCORD_TOKEN")
 CHANNEL_ID = int(os.getenv("NEWS_CHANNEL_ID", "0"))
-CHECK_INTERVAL_MINUTES = int(os.getenv("CHECK_INTERVAL_MINUTES", "1"))
+CHECK_INTERVAL_MINUTES = int(os.getenv("CHECK_INTERVAL_MINUTES", "30"))
 SYNC_COMMANDS = os.getenv("SYNC_COMMANDS", "0").strip().lower() in ("1", "true", "yes")
 SEEN_FILE = "seen_ids.json"
 SETTINGS_FILE = "settings.json"
