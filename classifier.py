@@ -50,7 +50,14 @@ def refresh_notable_players() -> None:
             messages=[{"role": "user", "content": _PLAYER_REFRESH_PROMPT}],
             temperature=0,
         )
-        players = json.loads(resp["choices"][0]["message"]["content"])
+        raw = resp["choices"][0]["message"]["content"].strip()
+        # Strip markdown code fences if present
+        if raw.startswith("```"):
+            raw = re.sub(r"^```[a-z]*\n?", "", raw)
+            raw = re.sub(r"\n?```$", "", raw).strip()
+        if not raw:
+            raise ValueError(f"Empty response from model; full resp: {resp}")
+        players = json.loads(raw)
         if isinstance(players, dict):
             players = next(iter(players.values()))
         _PLAYERS_CACHE_PATH.write_text(json.dumps({
