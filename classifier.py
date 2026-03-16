@@ -47,10 +47,14 @@ def refresh_notable_players() -> None:
     try:
         resp = _openrouter(
             model="perplexity/sonar",
-            messages=[{"role": "user", "content": _PLAYER_REFRESH_PROMPT}],
+            messages=[
+                {"role": "system", "content": "Respond with ONLY a valid JSON array of strings. No prose, no markdown, no explanation. Example: [\"patrick mahomes\", \"lamar jackson\"]"},
+                {"role": "user", "content": _PLAYER_REFRESH_PROMPT},
+            ],
             temperature=0,
         )
         raw = resp["choices"][0]["message"]["content"].strip()
+        print(f"[classifier] Sonar raw response: {raw[:300]!r}")
         # Strip markdown code fences if present
         if raw.startswith("```"):
             raw = re.sub(r"^```[a-z]*\n?", "", raw)
@@ -58,7 +62,7 @@ def refresh_notable_players() -> None:
         if not raw:
             raise ValueError(f"Empty response from model; full resp: {resp}")
         # Sonar may embed the array in prose — extract first [...] block
-        arr_match = re.search(r'\[.*?\]', raw, re.DOTALL)
+        arr_match = re.search(r'\[.*\]', raw, re.DOTALL)
         if arr_match:
             raw = arr_match.group(0)
         players = json.loads(raw)
