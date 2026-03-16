@@ -13,6 +13,8 @@ so you can tune or swap them independently.
 import re
 import requests
 
+from classifier import classify
+
 # ── 1. Chicago Bears filter ────────────────────────────────────────────────────
 
 CHICAGO_TERMS = {"chicago", "bears", "chi"}
@@ -53,16 +55,7 @@ def involves_draft_pick(item: dict) -> bool:
 
 # ── 3. Player prominence filter ───────────────────────────────────────────────
 
-# ESPN athlete endpoint — returns position, status, and fantasy info
-ESPN_ATHLETE_SEARCH = (
-    "https://sports.core.api.espn.com/v2/sports/football/leagues/nfl/athletes"
-    "?limit=10&active=true&q={name}"
-)
-
-# Roster statuses ESPN uses for active starters
-_STARTER_STATUSES = {"active", "day-to-day"}
-
-# Curated fallback: ~80 household names across all positions.
+# Curated fallback used by classifier.py when no cache exists.
 # Update this list at the start of each season.
 STAR_PLAYERS: set[str] = {
     # QBs
@@ -139,70 +132,6 @@ STAR_PLAYERS: set[str] = {
     "tyler bass", "brandon aubrey", "cameron dicker",
     "will reichard", "chris boswell",
 }
-
-
-def _extract_player_names(description: str) -> list[str]:
-    """
-    Heuristically extract candidate player names from a transaction description.
-    Looks for 2–3 consecutive capitalized words (First Last, First Middle Last).
-    """
-    pattern = re.compile(r"\b([A-Z][a-z''\-]+(?:\s[A-Z][a-z''\-]+){1,2})\b")
-    return pattern.findall(description)
-
-
-def _check_espn_prominence(name: str) -> bool:
-    """
-    Query ESPN's athlete API for a player name.
-    Returns True if the player is found and has a starter-level roster status.
-    """
-    try:
-        url = ESPN_ATHLETE_SEARCH.format(name=requests.utils.quote(name))
-        resp = requests.get(url, timeout=6)
-        resp.raise_for_status()
-        data = resp.json()
-        athletes = data.get("items", [])
-        if not athletes:
-            return False
-
-        # Fetch full athlete record for the top result
-        athlete_ref = athletes[0]
-        ref_url = athlete_ref.get("$ref", "")
-        if not ref_url:
-            return False
-
-        athlete_resp = requests.get(ref_url, timeout=6)
-        athlete_resp.raise_for_status()
-        athlete = athlete_resp.json()
-
-        status = athlete.get("status", {}).get("name", "").lower()
-        return status in _STARTER_STATUSES
-
-    except Exception as e:
-        print(f"[filters] ESPN prominence check failed for '{name}': {e}")
-        return None  # None = inconclusive, fall through to curated list
-
-
-def _check_curated_prominence(name: str) -> bool:
-    """Returns True if the name matches any entry in STAR_PLAYERS."""
-    return name.lower() in STAR_PLAYERS
-
-
-def involves_prominent_player(item: dict) -> bool:
-    """
-    True if any player in the description is prominent.
-    Strategy: ESPN API first → curated list as fallback if API is inconclusive.
-    """
-    candidates = _extract_player_names(item.get("description", ""))
-    for name in candidates:
-        api_result = _check_espn_prominence(name)
-        if api_result is True:
-            return True
-        if api_result is None:
-            # API was inconclusive — fall back to curated list
-            if _check_curated_prominence(name):
-                return True
-        # api_result is False → not a starter per ESPN, skip curated check
-    return False
 
 
 # ── 4. Contract signing filter ────────────────────────────────────────────────
@@ -306,9 +235,9 @@ def is_big_signing(item: dict) -> tuple[bool, str]:
         else:
             return False, ""
 
-    # No dollar figure at all — fall back to player prominence
-    if involves_prominent_player(item):
-        return True, "⭐ Notable signing (value undisclosed)"
+    # No dollar figure at all — fall back to LLM classifier
+    if classify(description):
+        return True, "⭐ Notable signing"
 
     return False, ""
 
@@ -320,15 +249,13 @@ def is_notable_news(item: dict) -> tuple[bool, str]:
     Returns (should_post, reason) for an ESPN RSS news item.
     Checks title + summary for Bears mentions, draft picks, and prominent players.
     """
-    proxy = {
-        "description": (item.get("title", "") + " " + item.get("summary", "")).strip(),
-        "team": "",
-    }
+    proxy_text = (item.get("title", "") + " " + item.get("summary", "")).strip()
+    proxy = {"description": proxy_text, "team": ""}
     if involves_chicago(proxy):
         return True, "🐻 Bears news"
     if involves_draft_pick(proxy):
         return True, "📋 Draft pick"
-    if involves_prominent_player(proxy):
+    if classify(proxy_text):
         return True, "⭐ Notable player"
     return False, ""
 
@@ -352,7 +279,7 @@ def is_notable_transaction(item: dict) -> tuple[bool, str]:
         return True, "🐻 Bears trade"
     if involves_draft_pick(item):
         return True, "📋 Draft pick involved"
-    if involves_prominent_player(item):
+    if classify(description):
         return True, "⭐ Notable player"
 
     return False, ""
