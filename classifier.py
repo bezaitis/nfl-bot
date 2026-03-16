@@ -57,6 +57,10 @@ def refresh_notable_players() -> None:
             raw = re.sub(r"\n?```$", "", raw).strip()
         if not raw:
             raise ValueError(f"Empty response from model; full resp: {resp}")
+        # Sonar may embed the array in prose — extract first [...] block
+        arr_match = re.search(r'\[.*?\]', raw, re.DOTALL)
+        if arr_match:
+            raw = arr_match.group(0)
         players = json.loads(raw)
         if isinstance(players, dict):
             players = next(iter(players.values()))
