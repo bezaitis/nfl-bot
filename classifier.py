@@ -30,11 +30,15 @@ def _openrouter(model: str, messages: list[dict], **kwargs) -> dict:
 _PLAYERS_CACHE_PATH = Path(__file__).parent / "notable_players_cache.json"
 
 _PLAYER_REFRESH_PROMPT = """\
-List the most notable current NFL players — include:
-- All starting QBs
-- Pro Bowl caliber starters at every position
+List the most notable current NFL players — include ALL of the following:
+- All 32 starting QBs plus notable backups
+- Pro Bowl caliber starters at every position across all 32 teams
 - Any player with significant NFL career history still active (e.g. Aaron Rodgers even on a low salary)
 - Players whose trade, signing, cut, or retirement would be major NFL news
+- Top rookies and draft prospects expected to start
+- All notable Bears players regardless of star status
+
+Aim for 150-200+ players. Be comprehensive — it is better to include too many than too few.
 
 Return ONLY a JSON array of full player names in lowercase. No explanation.
 Example: ["patrick mahomes", "lamar jackson", "aaron rodgers"]
@@ -52,6 +56,7 @@ def refresh_notable_players() -> None:
                 {"role": "user", "content": _PLAYER_REFRESH_PROMPT},
             ],
             temperature=0,
+            max_tokens=4000,
         )
         raw = resp["choices"][0]["message"]["content"].strip()
         print(f"[classifier] Sonar raw response: {raw[:300]!r}")
@@ -177,7 +182,11 @@ def classify(text: str) -> bool:
             max_tokens=60,
             temperature=0,
         )
-        result = json.loads(response["choices"][0]["message"]["content"])
+        raw = response["choices"][0]["message"]["content"].strip()
+        if raw.startswith("```"):
+            raw = re.sub(r"^```[a-z]*\n?", "", raw)
+            raw = re.sub(r"\n?```$", "", raw).strip()
+        result = json.loads(raw)
         should_post = bool(result.get("should_post", False))
     except Exception as e:
         print(f"[classifier] LLM call failed: {e}")
