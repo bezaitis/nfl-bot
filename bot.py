@@ -38,7 +38,7 @@ from fetcher import get_news, get_transactions, get_all_news, get_player
 from filters import is_notable_news
 from title_parser import build_structured_title
 from bluesky import get_writer_posts, WRITER_HANDLES
-from classifier import refresh_notable_players
+from classifier import classify
 
 load_dotenv()
 
@@ -246,9 +246,6 @@ async def on_ready():
 
     load_seen()
 
-    if not Path("notable_players_cache.json").exists():
-        await asyncio.to_thread(refresh_notable_players)  # seed on first boot
-
     if CHANNEL_ID:
         settings = load_settings()
         source = settings.get("source", "both")
@@ -257,7 +254,6 @@ async def on_ready():
             auto_post_espn.change_interval(minutes=saved_interval)
         auto_post_espn.start()
         auto_post_bluesky.start()
-        refresh_player_list.start()
         logger.info("ESPN news loop: every %s min | Bluesky loop: every 10 min", saved_interval)
         logger.info("Active source: %s → channel %s", source, CHANNEL_ID)
     else:
@@ -336,6 +332,9 @@ async def auto_post_bluesky():
             break
         if post["id"] in _seen:
             continue
+        if not await asyncio.to_thread(classify, post["text"]):
+            _seen.add(post["id"])
+            continue
         try:
             await channel.send(embed=bluesky_embed(post))
             _seen.add(post["id"])
@@ -354,20 +353,6 @@ async def auto_post_bluesky():
 @auto_post_espn.before_loop
 @auto_post_bluesky.before_loop
 async def before_loops():
-    await bot.wait_until_ready()
-
-
-@tasks.loop(hours=24)
-async def refresh_player_list():
-    """Fire on the 1st of every quarter (Jan, Apr, Jul, Oct) regardless of uptime."""
-    now = datetime.now(timezone.utc)
-    if now.day == 1 and now.month in (1, 4, 7, 10):
-        await asyncio.to_thread(refresh_notable_players)
-        logger.info("Quarterly player list refresh complete")
-
-
-@refresh_player_list.before_loop
-async def before_refresh():
     await bot.wait_until_ready()
 
 
@@ -406,11 +391,6 @@ async def cmd_help(interaction: discord.Interaction):
     embed.add_field(
         name="/writers `[writer]`",
         value="View all Bluesky beat writers and their status. Pass a writer to toggle, or choose Enable All / Disable All.",
-        inline=False,
-    )
-    embed.add_field(
-        name="/refresh-players",
-        value="Force-refresh the notable NFL player list used by the LLM classifier via Perplexity Sonar. Requires Manage Server.",
         inline=False,
     )
     embed.set_footer(text="Auto-post: ESPN interval adjustable · Bluesky every 10 min")
@@ -566,35 +546,6 @@ async def cmd_player(interaction: discord.Interaction, name: str):
         )
         return
     await interaction.followup.send(embed=player_embed(player))
-
-
-@bot.tree.command(name="refresh-players", description="Force-refresh the notable NFL player list via web research")
-async def cmd_refresh_players(interaction: discord.Interaction):
-    if not _has_manage_guild(interaction):
-        await interaction.response.send_message(
-            "⚠️ You need Manage Server permission to refresh the player list.", ephemeral=True
-        )
-        return
-
-    await interaction.response.defer(ephemeral=True)
-    await asyncio.to_thread(refresh_notable_players)
-
-    try:
-        cache = json.loads(Path("notable_players_cache.json").read_text())
-        players = cache["players"]
-        updated_at = cache["updated_at"][:10]
-        player_text = ", ".join(sorted(players))
-        chunks = [player_text[i:i+1000] for i in range(0, len(player_text), 1000)]
-        embed = discord.Embed(
-            title="🏈 Notable NFL Players — Updated",
-            description=f"Refreshed via Perplexity Sonar on {updated_at}. {len(players)} players.",
-            color=discord.Color.green(),
-        )
-        for i, chunk in enumerate(chunks):
-            embed.add_field(name=f"Players ({i+1}/{len(chunks)})", value=chunk, inline=False)
-        await interaction.followup.send(embed=embed, ephemeral=True)
-    except Exception as e:
-        await interaction.followup.send(f"⚠️ Refresh failed: {e}", ephemeral=True)
 
 
 # ── Run ───────────────────────────────────────────────────────────────────────
