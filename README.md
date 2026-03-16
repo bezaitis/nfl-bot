@@ -2,7 +2,9 @@
 
 A Discord bot that tracks NFL transactions and news, posting them to your server automatically and on-demand via slash commands.
 
-**Data sources:** ESPN public APIs/RSS (transactions & headlines) + Bluesky beat writers (breaking news) — no API keys required.
+**Data sources:** ESPN public APIs/RSS (transactions & headlines) + Bluesky beat writers (breaking news).
+
+**Filtering:** All auto-posted content is filtered by a Gemini LLM classifier (via OpenRouter) with a static notable-player fallback list — only significant NFL news makes it through.
 
 ---
 
@@ -17,7 +19,8 @@ A Discord bot that tracks NFL transactions and news, posting them to your server
 | `/writers [writer]` | View all Bluesky beat writers and toggle them on/off |
 | `/help` | Show all commands and usage |
 | ESPN auto-posting | Posts notable transactions every 30 min (configurable) |
-| Bluesky auto-posting | Posts beat writer updates every 10 min |
+| Bluesky auto-posting | Posts beat writer updates every 10 min, filtered by Gemini |
+| LLM filtering | Gemini classifies every post; falls back to a static star-player list if Gemini says no |
 | Deduplication | Tracks seen items — nothing gets posted twice |
 | Story deduplication | Only the first writer to break a story is posted |
 
@@ -80,6 +83,7 @@ Edit `.env` to change behavior:
 |---|---|---|
 | `DISCORD_TOKEN` | required | Your bot token |
 | `NEWS_CHANNEL_ID` | required | Channel for auto-posts |
+| `OPENROUTER_API_KEY` | required | API key for OpenRouter (used for Gemini LLM filtering) |
 | `CHECK_INTERVAL_MINUTES` | `30` | How often to check ESPN for new transactions |
 | `SYNC_COMMANDS` | `0` | Set to `1` on first run to register slash commands |
 
@@ -93,7 +97,8 @@ Runtime settings (source, disabled writers) are stored in `settings.json` and pe
 nfl-bot/
 ├── bot.py              # Discord bot, slash commands, scheduled tasks
 ├── fetcher.py          # ESPN API + RSS data fetching
-├── filters.py          # Transaction importance filter (AAV, draft picks, etc.)
+├── filters.py          # Transaction importance filter (AAV, draft picks, Bears, etc.)
+├── classifier.py       # Gemini LLM classifier + static STAR_PLAYERS fallback list
 ├── title_parser.py     # Structured title extraction from raw ESPN descriptions
 ├── bluesky.py          # Bluesky beat writer fetcher with story deduplication
 ├── requirements.txt
@@ -143,3 +148,4 @@ Some ideas for future additions:
 - [feedparser](https://feedparser.readthedocs.io/) — RSS parsing
 - [requests](https://requests.readthedocs.io/) — HTTP requests
 - [python-dotenv](https://pypi.org/project/python-dotenv/) — Environment variable management
+- [OpenRouter](https://openrouter.ai/) + [Gemini 2.5 Flash](https://deepmind.google/technologies/gemini/) — LLM-based news relevance filtering
