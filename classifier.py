@@ -189,9 +189,6 @@ def classify(text: str) -> bool:
     except Exception as e:
         print(f"[classifier] LLM call failed: {e}")
         should_post = False
-    # Fallback: if Gemini said no, still post if a known star player is mentioned
-    if not should_post:
-        should_post = _mentions_star_player(text)
     if fp:
         _store_cache(fp, should_post)
     return should_post
