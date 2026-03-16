@@ -13,7 +13,7 @@ so you can tune or swap them independently.
 import re
 import requests
 
-from classifier import classify
+from classifier import classify, STAR_PLAYERS
 
 # ── 1. Chicago Bears filter ────────────────────────────────────────────────────
 
@@ -54,84 +54,7 @@ def involves_draft_pick(item: dict) -> bool:
 
 
 # ── 3. Player prominence filter ───────────────────────────────────────────────
-
-# Curated fallback used by classifier.py when no cache exists.
-# Update this list at the start of each season.
-STAR_PLAYERS: set[str] = {
-    # QBs
-    "patrick mahomes", "josh allen", "lamar jackson", "joe burrow", "jalen hurts",
-    "dak prescott", "tua tagovailoa", "justin herbert", "jordan love", "brock purdy",
-    "caleb williams", "jayden daniels", "sam darnold",
-    "c.j. stroud", "anthony richardson", "drake maye", "bo nix",
-    "matthew stafford", "baker mayfield", "kyler murray", "trevor lawrence",
-    "geno smith", "kirk cousins", "russell wilson", "aaron rodgers", "jared goff",
-    # RBs
-    "christian mccaffrey", "derrick henry", "saquon barkley", "de'von achane",
-    "josh jacobs", "jahmyr gibbs", "breece hall", "bijan robinson", "james cook",
-    "kyren williams", "jonathan taylor", "alvin kamara", "tony pollard",
-    "travis etienne", "joe mixon", "d'andre swift", "najee harris",
-    "david montgomery", "isaiah pacheco", "rachaad white", "aaron jones",
-    "rhamondre stevenson", "zamir white", "chuba hubbard", "javonte williams",
-    "ray davis",
-    # WRs
-    "tyreek hill", "davante adams", "stefon diggs", "a.j. brown", "justin jefferson",
-    "ceedee lamb", "deebo samuel", "amon-ra st. brown", "puka nacua", "jaylen waddle",
-    "chris olave", "drake london", "courtland sutton", "michael pittman",
-    "tee higgins", "george pickens", "jordan addison", "keenan allen",
-    "mike evans", "dk metcalf", "nico collins", "garrett wilson",
-    "tank dell", "rashee rice", "zay flowers", "marvin harrison jr.",
-    "rome odunze", "xavier worthy", "ladd mcconkey", "dj moore",
-    "tyler lockett", "diontae johnson", "jaxon smith-njigba",
-    "xavier legette", "brian thomas jr.", "wan'dale robinson",
-    "jameson williams", "rashid shaheed", "christian watson",
-    "ja'marr chase", "malik nabers", "terry mclaurin", "jerry jeudy",
-    # TEs
-    "travis kelce", "sam laporta", "mark andrews", "t.j. hockenson", "evan engram",
-    "dalton kincaid", "kyle pitts", "pat freiermuth", "david njoku",
-    "george kittle", "trey mcbride", "jake ferguson", "brock bowers",
-    "isaiah likely", "cade otton", "tucker kraft", "jonnu smith",
-    # OL
-    "trent williams", "lane johnson", "tristan wirfs", "penei sewell",
-    "rashawn slater", "christian darrisaw", "darnell wright",
-    "paris johnson jr.", "zion johnson", "joe thuney",
-    "garrett bolles", "creed humphrey", "quinn meinerz", "quenton nelson",
-    "chris lindstrom", "trey smith", "tyler linderbaum", "laremy tunsil",
-    # Edge / Pass Rush
-    "micah parsons", "myles garrett", "maxx crosby", "nick bosa", "tj watt",
-    "za'darius smith",
-    "aidan hutchinson", "will anderson jr.", "brian burns", "rashan gary",
-    "trey hendrickson", "haason reddick", "josh uche", "kayvon thibodeaux",
-    "travon walker", "jared verse", "chop robinson", "laiatu latu",
-    "nik bonitto", "danielle hunter", "khalil mack",
-    # DL (interior)
-    "chris jones", "quinnen williams", "dexter lawrence", "jalen carter",
-    "jeffery simmons", "jonathan allen", "daron payne",
-    "cameron heyward", "nnamdi madubuike", "zach allen", "leonard williams",
-    # LB
-    "roquan smith",
-    "fred warner", "demario davis", "bobby wagner", "tremaine edmunds",
-    "zaire franklin", "devin white", "quay walker", "jack campbell",
-    "jordyn brooks", "patrick queen", "devin lloyd", "ernest jones iv",
-    # CB
-    "jalen ramsey", "sauce gardner", "darius slay", "jaire alexander",
-    "trevon diggs", "marshon lattimore", "christian gonzalez",
-    "devon witherspoon", "joey porter jr.", "nate hobbs",
-    "kendall fuller", "patrick surtain ii", "denzel ward",
-    "d.j. reed", "tariq woolen", "kelee ringo",
-    "derek stingley jr.", "quinyon mitchell", "cooper dejean", "marlon humphrey",
-    "byron murphy jr.",
-    # S / DB
-    "justin simmons",
-    "minkah fitzpatrick", "derwin james", "xavier mckinney",
-    "budda baker", "harrison smith", "jordan poyer", "kyle hamilton",
-    "talanoa hufanga", "quandre diggs", "chamarri conner",
-    "kevin byard", "jessie bates iii",
-    # K
-    "justin tucker",
-    "harrison butker", "evan mcpherson", "jake elliott",
-    "tyler bass", "brandon aubrey", "cameron dicker",
-    "will reichard", "chris boswell",
-}
+# STAR_PLAYERS is defined in classifier.py and imported above.
 
 
 # ── 4. Contract signing filter ────────────────────────────────────────────────
