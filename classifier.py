@@ -48,7 +48,6 @@ def refresh_notable_players() -> None:
         resp = _openrouter(
             model="perplexity/sonar",
             messages=[{"role": "user", "content": _PLAYER_REFRESH_PROMPT}],
-            response_format={"type": "json_object"},
             temperature=0,
         )
         players = json.loads(resp["choices"][0]["message"]["content"])
