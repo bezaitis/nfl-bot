@@ -13,7 +13,7 @@ Slash commands:
 Auto-posting:
   ESPN news stories    — every 30 min by default (adjustable via /interval)
   Bluesky beat writers — every 10 min (independent loop)
-  Both loops deduplicate against seen_ids.json and respect the /source setting.
+  Both loops deduplicate against a shared in-memory set (persisted to seen_ids.json) and respect the /source setting.
 
 Setup:
   1. Copy .env.example → .env and fill in your values
@@ -27,6 +27,7 @@ import json
 import logging
 import os
 from datetime import datetime, timezone
+from pathlib import Path
 
 import discord
 from discord import app_commands
@@ -37,6 +38,7 @@ from fetcher import get_news, get_transactions, get_all_news, get_player
 from filters import is_notable_news
 from title_parser import build_structured_title
 from bluesky import get_writer_posts, WRITER_HANDLES
+from classifier import refresh_notable_players
 
 load_dotenv()
 
@@ -87,18 +89,26 @@ _WRITER_CHOICES = [
 
 
 # ── Deduplication helpers ─────────────────────────────────────────────────────
-def load_seen() -> set[str]:
+_seen: set[str] = set()
+
+
+def load_seen() -> None:
+    """Load seen IDs from disk into the shared in-memory set."""
+    global _seen
     try:
         with open(SEEN_FILE) as f:
-            return set(json.load(f))
+            _seen = set(json.load(f))
     except (FileNotFoundError, json.JSONDecodeError):
-        return set()
+        _seen = set()
 
 
-def save_seen(seen: set[str]) -> None:
-    trimmed = list(seen)[-SEEN_MAX_SIZE:]
+def save_seen() -> None:
+    """Persist the shared in-memory seen set to disk, trimmed to SEEN_MAX_SIZE."""
+    items = list(_seen)
+    if len(items) > SEEN_MAX_SIZE:
+        items = items[-SEEN_MAX_SIZE:]
     with open(SEEN_FILE, "w") as f:
-        json.dump(trimmed, f)
+        json.dump(items, f)
 
 
 # ── Settings helpers ──────────────────────────────────────────────────────────
@@ -234,6 +244,11 @@ async def on_ready():
     else:
         logger.debug("SYNC_COMMANDS not set — skipping tree sync")
 
+    load_seen()
+
+    if not Path("notable_players_cache.json").exists():
+        await asyncio.to_thread(refresh_notable_players)  # seed on first boot
+
     if CHANNEL_ID:
         settings = load_settings()
         source = settings.get("source", "both")
@@ -242,6 +257,7 @@ async def on_ready():
             auto_post_espn.change_interval(minutes=saved_interval)
         auto_post_espn.start()
         auto_post_bluesky.start()
+        refresh_player_list.start()
         logger.info("ESPN news loop: every %s min | Bluesky loop: every 10 min", saved_interval)
         logger.info("Active source: %s → channel %s", source, CHANNEL_ID)
     else:
@@ -260,7 +276,6 @@ async def auto_post_espn():
         logger.warning("[espn] Channel %s not found", CHANNEL_ID)
         return
 
-    seen = load_seen()
     all_news = await asyncio.to_thread(get_all_news, 50)
 
     if not all_news:
@@ -269,7 +284,7 @@ async def auto_post_espn():
 
     notable = []
     for item in all_news:
-        if item["id"] in seen:
+        if item["id"] in _seen:
             continue
         should_post, reason = is_notable_news(item)
         if should_post:
@@ -279,15 +294,15 @@ async def auto_post_espn():
     for item, reason in notable[:5]:
         try:
             await channel.send(embed=news_story_embed(item, reason))
-            seen.add(item["id"])
+            _seen.add(item["id"])
             posted += 1
         except discord.HTTPException as e:
             logger.warning("[espn] Send failed: %s", e)
 
     for item in all_news:
-        seen.add(item["id"])
+        _seen.add(item["id"])
 
-    save_seen(seen)
+    save_seen()
     if posted:
         logger.info("[espn] Posted %s news story(s)", posted)
     else:
@@ -309,7 +324,6 @@ async def auto_post_bluesky():
     if not active_handles:
         return
 
-    seen = load_seen()
     bsky_posts = await asyncio.to_thread(get_writer_posts, active_handles)
 
     if not bsky_posts:
@@ -320,19 +334,19 @@ async def auto_post_bluesky():
     for post in bsky_posts:
         if posted >= 5:
             break
-        if post["id"] in seen:
+        if post["id"] in _seen:
             continue
         try:
             await channel.send(embed=bluesky_embed(post))
-            seen.add(post["id"])
+            _seen.add(post["id"])
             posted += 1
         except discord.HTTPException as e:
             logger.warning("[bluesky] Send failed: %s", e)
 
     for post in bsky_posts:
-        seen.add(post["id"])
+        _seen.add(post["id"])
 
-    save_seen(seen)
+    save_seen()
     if posted:
         logger.info("[bluesky] Posted %s post(s)", posted)
 
@@ -340,6 +354,20 @@ async def auto_post_bluesky():
 @auto_post_espn.before_loop
 @auto_post_bluesky.before_loop
 async def before_loops():
+    await bot.wait_until_ready()
+
+
+@tasks.loop(hours=24)
+async def refresh_player_list():
+    """Fire on the 1st of every quarter (Jan, Apr, Jul, Oct) regardless of uptime."""
+    now = datetime.now(timezone.utc)
+    if now.day == 1 and now.month in (1, 4, 7, 10):
+        await asyncio.to_thread(refresh_notable_players)
+        logger.info("Quarterly player list refresh complete")
+
+
+@refresh_player_list.before_loop
+async def before_refresh():
     await bot.wait_until_ready()
 
 
@@ -378,6 +406,11 @@ async def cmd_help(interaction: discord.Interaction):
     embed.add_field(
         name="/writers `[writer]`",
         value="View all Bluesky beat writers and their status. Pass a writer to toggle, or choose Enable All / Disable All.",
+        inline=False,
+    )
+    embed.add_field(
+        name="/refresh-players",
+        value="Force-refresh the notable NFL player list used by the LLM classifier via Perplexity Sonar. Requires Manage Server.",
         inline=False,
     )
     embed.set_footer(text="Auto-post: ESPN interval adjustable · Bluesky every 10 min")
@@ -533,6 +566,35 @@ async def cmd_player(interaction: discord.Interaction, name: str):
         )
         return
     await interaction.followup.send(embed=player_embed(player))
+
+
+@bot.tree.command(name="refresh-players", description="Force-refresh the notable NFL player list via web research")
+async def cmd_refresh_players(interaction: discord.Interaction):
+    if not _has_manage_guild(interaction):
+        await interaction.response.send_message(
+            "⚠️ You need Manage Server permission to refresh the player list.", ephemeral=True
+        )
+        return
+
+    await interaction.response.defer(ephemeral=True)
+    await asyncio.to_thread(refresh_notable_players)
+
+    try:
+        cache = json.loads(Path("notable_players_cache.json").read_text())
+        players = cache["players"]
+        updated_at = cache["updated_at"][:10]
+        player_text = ", ".join(sorted(players))
+        chunks = [player_text[i:i+1000] for i in range(0, len(player_text), 1000)]
+        embed = discord.Embed(
+            title="🏈 Notable NFL Players — Updated",
+            description=f"Refreshed via Perplexity Sonar on {updated_at}. {len(players)} players.",
+            color=discord.Color.green(),
+        )
+        for i, chunk in enumerate(chunks):
+            embed.add_field(name=f"Players ({i+1}/{len(chunks)})", value=chunk, inline=False)
+        await interaction.followup.send(embed=embed, ephemeral=True)
+    except Exception as e:
+        await interaction.followup.send(f"⚠️ Refresh failed: {e}", ephemeral=True)
 
 
 # ── Run ───────────────────────────────────────────────────────────────────────
