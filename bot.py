@@ -13,7 +13,7 @@ Slash commands:
 Auto-posting:
   ESPN news stories    — every 30 min by default (adjustable via /interval)
   Bluesky beat writers — every 10 min (independent loop)
-  Both loops deduplicate against a shared in-memory set (persisted to seen_ids.json) and respect the /source setting.
+  Both loops deduplicate against seen_ids.json and respect the /source setting.
 
 Setup:
   1. Copy .env.example → .env and fill in your values
@@ -27,7 +27,6 @@ import json
 import logging
 import os
 from datetime import datetime, timezone
-from pathlib import Path
 
 import discord
 from discord import app_commands
@@ -38,7 +37,6 @@ from fetcher import get_news, get_transactions, get_all_news, get_player
 from filters import is_notable_news
 from title_parser import build_structured_title
 from bluesky import get_writer_posts, WRITER_HANDLES
-from classifier import classify
 
 load_dotenv()
 
@@ -53,7 +51,7 @@ logger = logging.getLogger("nfl-bot")
 # ── Config ────────────────────────────────────────────────────────────────────
 TOKEN = os.getenv("DISCORD_TOKEN")
 CHANNEL_ID = int(os.getenv("NEWS_CHANNEL_ID", "0"))
-CHECK_INTERVAL_MINUTES = int(os.getenv("CHECK_INTERVAL_MINUTES", "30"))
+CHECK_INTERVAL_MINUTES = int(os.getenv("CHECK_INTERVAL_MINUTES", "1"))
 SYNC_COMMANDS = os.getenv("SYNC_COMMANDS", "0").strip().lower() in ("1", "true", "yes")
 SEEN_FILE = "seen_ids.json"
 SETTINGS_FILE = "settings.json"
@@ -89,26 +87,18 @@ _WRITER_CHOICES = [
 
 
 # ── Deduplication helpers ─────────────────────────────────────────────────────
-_seen: set[str] = set()
-
-
-def load_seen() -> None:
-    """Load seen IDs from disk into the shared in-memory set."""
-    global _seen
+def load_seen() -> set[str]:
     try:
         with open(SEEN_FILE) as f:
-            _seen = set(json.load(f))
+            return set(json.load(f))
     except (FileNotFoundError, json.JSONDecodeError):
-        _seen = set()
+        return set()
 
 
-def save_seen() -> None:
-    """Persist the shared in-memory seen set to disk, trimmed to SEEN_MAX_SIZE."""
-    items = list(_seen)
-    if len(items) > SEEN_MAX_SIZE:
-        items = items[-SEEN_MAX_SIZE:]
+def save_seen(seen: set[str]) -> None:
+    trimmed = list(seen)[-SEEN_MAX_SIZE:]
     with open(SEEN_FILE, "w") as f:
-        json.dump(items, f)
+        json.dump(trimmed, f)
 
 
 # ── Settings helpers ──────────────────────────────────────────────────────────
@@ -244,8 +234,6 @@ async def on_ready():
     else:
         logger.debug("SYNC_COMMANDS not set — skipping tree sync")
 
-    load_seen()
-
     if CHANNEL_ID:
         settings = load_settings()
         source = settings.get("source", "both")
@@ -272,6 +260,7 @@ async def auto_post_espn():
         logger.warning("[espn] Channel %s not found", CHANNEL_ID)
         return
 
+    seen = load_seen()
     all_news = await asyncio.to_thread(get_all_news, 50)
 
     if not all_news:
@@ -280,7 +269,7 @@ async def auto_post_espn():
 
     notable = []
     for item in all_news:
-        if item["id"] in _seen:
+        if item["id"] in seen:
             continue
         should_post, reason = is_notable_news(item)
         if should_post:
@@ -290,15 +279,15 @@ async def auto_post_espn():
     for item, reason in notable[:5]:
         try:
             await channel.send(embed=news_story_embed(item, reason))
-            _seen.add(item["id"])
+            seen.add(item["id"])
             posted += 1
         except discord.HTTPException as e:
             logger.warning("[espn] Send failed: %s", e)
 
     for item in all_news:
-        _seen.add(item["id"])
+        seen.add(item["id"])
 
-    save_seen()
+    save_seen(seen)
     if posted:
         logger.info("[espn] Posted %s news story(s)", posted)
     else:
@@ -320,6 +309,7 @@ async def auto_post_bluesky():
     if not active_handles:
         return
 
+    seen = load_seen()
     bsky_posts = await asyncio.to_thread(get_writer_posts, active_handles)
 
     if not bsky_posts:
@@ -330,22 +320,19 @@ async def auto_post_bluesky():
     for post in bsky_posts:
         if posted >= 5:
             break
-        if post["id"] in _seen:
-            continue
-        if not await asyncio.to_thread(classify, post["text"]):
-            _seen.add(post["id"])
+        if post["id"] in seen:
             continue
         try:
             await channel.send(embed=bluesky_embed(post))
-            _seen.add(post["id"])
+            seen.add(post["id"])
             posted += 1
         except discord.HTTPException as e:
             logger.warning("[bluesky] Send failed: %s", e)
 
     for post in bsky_posts:
-        _seen.add(post["id"])
+        seen.add(post["id"])
 
-    save_seen()
+    save_seen(seen)
     if posted:
         logger.info("[bluesky] Posted %s post(s)", posted)
 

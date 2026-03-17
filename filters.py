@@ -13,8 +13,6 @@ so you can tune or swap them independently.
 import re
 import requests
 
-from classifier import classify, STAR_PLAYERS
-
 # ── 1. Chicago Bears filter ────────────────────────────────────────────────────
 
 CHICAGO_TERMS = {"chicago", "bears", "chi"}
@@ -54,7 +52,157 @@ def involves_draft_pick(item: dict) -> bool:
 
 
 # ── 3. Player prominence filter ───────────────────────────────────────────────
-# STAR_PLAYERS is defined in classifier.py and imported above.
+
+# ESPN athlete endpoint — returns position, status, and fantasy info
+ESPN_ATHLETE_SEARCH = (
+    "https://sports.core.api.espn.com/v2/sports/football/leagues/nfl/athletes"
+    "?limit=10&active=true&q={name}"
+)
+
+# Roster statuses ESPN uses for active starters
+_STARTER_STATUSES = {"active", "day-to-day"}
+
+# Curated fallback: ~80 household names across all positions.
+# Update this list at the start of each season.
+STAR_PLAYERS: set[str] = {
+    # QBs
+    "patrick mahomes", "josh allen", "lamar jackson", "joe burrow", "jalen hurts",
+    "dak prescott", "tua tagovailoa", "justin herbert", "jordan love", "brock purdy",
+    "caleb williams", "jayden daniels", "sam darnold",
+    "c.j. stroud", "anthony richardson", "drake maye", "bo nix",
+    "matthew stafford", "baker mayfield", "kyler murray", "trevor lawrence",
+    "geno smith", "kirk cousins", "russell wilson", "aaron rodgers", "jared goff",
+    # RBs
+    "christian mccaffrey", "derrick henry", "saquon barkley", "de'von achane",
+    "josh jacobs", "jahmyr gibbs", "breece hall", "bijan robinson", "james cook",
+    "kyren williams", "jonathan taylor", "alvin kamara", "tony pollard",
+    "travis etienne", "joe mixon", "d'andre swift", "najee harris",
+    "david montgomery", "isaiah pacheco", "rachaad white", "aaron jones",
+    "rhamondre stevenson", "zamir white", "chuba hubbard", "javonte williams",
+    "ray davis",
+    # WRs
+    "tyreek hill", "davante adams", "stefon diggs", "a.j. brown", "justin jefferson",
+    "ceedee lamb", "deebo samuel", "amon-ra st. brown", "puka nacua", "jaylen waddle",
+    "chris olave", "drake london", "courtland sutton", "michael pittman",
+    "tee higgins", "george pickens", "jordan addison", "keenan allen",
+    "mike evans", "dk metcalf", "nico collins", "garrett wilson",
+    "tank dell", "rashee rice", "zay flowers", "marvin harrison jr.",
+    "rome odunze", "xavier worthy", "ladd mcconkey", "dj moore",
+    "tyler lockett", "diontae johnson", "jaxon smith-njigba",
+    "xavier legette", "brian thomas jr.", "wan'dale robinson",
+    "jameson williams", "rashid shaheed", "christian watson",
+    "ja'marr chase", "malik nabers", "terry mclaurin", "jerry jeudy",
+    # TEs
+    "travis kelce", "sam laporta", "mark andrews", "t.j. hockenson", "evan engram",
+    "dalton kincaid", "kyle pitts", "pat freiermuth", "david njoku",
+    "george kittle", "trey mcbride", "jake ferguson", "brock bowers",
+    "isaiah likely", "cade otton", "tucker kraft", "jonnu smith",
+    # OL
+    "trent williams", "lane johnson", "tristan wirfs", "penei sewell",
+    "rashawn slater", "christian darrisaw", "darnell wright",
+    "paris johnson jr.", "zion johnson", "joe thuney",
+    "garrett bolles", "creed humphrey", "quinn meinerz", "quenton nelson",
+    "chris lindstrom", "trey smith", "tyler linderbaum", "laremy tunsil",
+    # Edge / Pass Rush
+    "micah parsons", "myles garrett", "maxx crosby", "nick bosa", "tj watt",
+    "za'darius smith",
+    "aidan hutchinson", "will anderson jr.", "brian burns", "rashan gary",
+    "trey hendrickson", "haason reddick", "josh uche", "kayvon thibodeaux",
+    "travon walker", "jared verse", "chop robinson", "laiatu latu",
+    "nik bonitto", "danielle hunter", "khalil mack",
+    # DL (interior)
+    "chris jones", "quinnen williams", "dexter lawrence", "jalen carter",
+    "jeffery simmons", "jonathan allen", "daron payne",
+    "cameron heyward", "nnamdi madubuike", "zach allen", "leonard williams",
+    # LB
+    "roquan smith",
+    "fred warner", "demario davis", "bobby wagner", "tremaine edmunds",
+    "zaire franklin", "devin white", "quay walker", "jack campbell",
+    "jordyn brooks", "patrick queen", "devin lloyd", "ernest jones iv",
+    # CB
+    "jalen ramsey", "sauce gardner", "darius slay", "jaire alexander",
+    "trevon diggs", "marshon lattimore", "christian gonzalez",
+    "devon witherspoon", "joey porter jr.", "nate hobbs",
+    "kendall fuller", "patrick surtain ii", "denzel ward",
+    "d.j. reed", "tariq woolen", "kelee ringo",
+    "derek stingley jr.", "quinyon mitchell", "cooper dejean", "marlon humphrey",
+    "byron murphy jr.",
+    # S / DB
+    "justin simmons",
+    "minkah fitzpatrick", "derwin james", "xavier mckinney",
+    "budda baker", "harrison smith", "jordan poyer", "kyle hamilton",
+    "talanoa hufanga", "quandre diggs", "chamarri conner",
+    "kevin byard", "jessie bates iii",
+    # K
+    "justin tucker",
+    "harrison butker", "evan mcpherson", "jake elliott",
+    "tyler bass", "brandon aubrey", "cameron dicker",
+    "will reichard", "chris boswell",
+}
+
+
+def _extract_player_names(description: str) -> list[str]:
+    """
+    Heuristically extract candidate player names from a transaction description.
+    Looks for 2–3 consecutive capitalized words (First Last, First Middle Last).
+    """
+    pattern = re.compile(r"\b([A-Z][a-z''\-]+(?:\s[A-Z][a-z''\-]+){1,2})\b")
+    return pattern.findall(description)
+
+
+def _check_espn_prominence(name: str) -> bool:
+    """
+    Query ESPN's athlete API for a player name.
+    Returns True if the player is found and has a starter-level roster status.
+    """
+    try:
+        url = ESPN_ATHLETE_SEARCH.format(name=requests.utils.quote(name))
+        resp = requests.get(url, timeout=6)
+        resp.raise_for_status()
+        data = resp.json()
+        athletes = data.get("items", [])
+        if not athletes:
+            return False
+
+        # Fetch full athlete record for the top result
+        athlete_ref = athletes[0]
+        ref_url = athlete_ref.get("$ref", "")
+        if not ref_url:
+            return False
+
+        athlete_resp = requests.get(ref_url, timeout=6)
+        athlete_resp.raise_for_status()
+        athlete = athlete_resp.json()
+
+        status = athlete.get("status", {}).get("name", "").lower()
+        return status in _STARTER_STATUSES
+
+    except Exception as e:
+        print(f"[filters] ESPN prominence check failed for '{name}': {e}")
+        return None  # None = inconclusive, fall through to curated list
+
+
+def _check_curated_prominence(name: str) -> bool:
+    """Returns True if the name matches any entry in STAR_PLAYERS."""
+    return name.lower() in STAR_PLAYERS
+
+
+def involves_prominent_player(item: dict) -> bool:
+    """
+    True if any player in the description is prominent.
+    Strategy: ESPN API first → curated list as fallback if API is inconclusive.
+    """
+    candidates = _extract_player_names(item.get("description", ""))
+    for name in candidates:
+        api_result = _check_espn_prominence(name)
+        if api_result is True:
+            return True
+        if api_result is None:
+            # API was inconclusive — fall back to curated list
+            if _check_curated_prominence(name):
+                return True
+        # api_result is False → not a starter per ESPN, skip curated check
+    return False
 
 
 # ── 4. Contract signing filter ────────────────────────────────────────────────
@@ -158,9 +306,9 @@ def is_big_signing(item: dict) -> tuple[bool, str]:
         else:
             return False, ""
 
-    # No dollar figure at all — fall back to LLM classifier
-    if classify(description):
-        return True, "⭐ Notable signing"
+    # No dollar figure at all — fall back to player prominence
+    if involves_prominent_player(item):
+        return True, "⭐ Notable signing (value undisclosed)"
 
     return False, ""
 
@@ -172,13 +320,15 @@ def is_notable_news(item: dict) -> tuple[bool, str]:
     Returns (should_post, reason) for an ESPN RSS news item.
     Checks title + summary for Bears mentions, draft picks, and prominent players.
     """
-    proxy_text = (item.get("title", "") + " " + item.get("summary", "")).strip()
-    proxy = {"description": proxy_text, "team": ""}
+    proxy = {
+        "description": (item.get("title", "") + " " + item.get("summary", "")).strip(),
+        "team": "",
+    }
     if involves_chicago(proxy):
         return True, "🐻 Bears news"
     if involves_draft_pick(proxy):
         return True, "📋 Draft pick"
-    if classify(proxy_text):
+    if involves_prominent_player(proxy):
         return True, "⭐ Notable player"
     return False, ""
 
@@ -202,7 +352,7 @@ def is_notable_transaction(item: dict) -> tuple[bool, str]:
         return True, "🐻 Bears trade"
     if involves_draft_pick(item):
         return True, "📋 Draft pick involved"
-    if classify(description):
+    if involves_prominent_player(item):
         return True, "⭐ Notable player"
 
     return False, ""
