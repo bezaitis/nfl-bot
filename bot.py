@@ -87,16 +87,19 @@ _WRITER_CHOICES = [
 
 
 # ── Deduplication helpers ─────────────────────────────────────────────────────
-def load_seen() -> set[str]:
+def load_seen() -> tuple[set[str], list[str]]:
+    """Return (set for O(1) lookup, ordered list for insertion-order trimming)."""
     try:
         with open(SEEN_FILE) as f:
-            return set(json.load(f))
+            data = json.load(f)
+        return set(data), list(data)
     except (FileNotFoundError, json.JSONDecodeError):
-        return set()
+        return set(), []
 
 
-def save_seen(seen: set[str]) -> None:
-    trimmed = list(seen)[-SEEN_MAX_SIZE:]
+def save_seen(seen_list: list[str]) -> None:
+    """Persist seen IDs, keeping only the most recent SEEN_MAX_SIZE entries."""
+    trimmed = seen_list[-SEEN_MAX_SIZE:]
     with open(SEEN_FILE, "w") as f:
         json.dump(trimmed, f)
 
@@ -260,7 +263,7 @@ async def auto_post_espn():
         logger.warning("[espn] Channel %s not found", CHANNEL_ID)
         return
 
-    seen = load_seen()
+    seen, seen_list = load_seen()
     all_news = await asyncio.to_thread(get_all_news, 50)
 
     if not all_news:
@@ -280,14 +283,17 @@ async def auto_post_espn():
         try:
             await channel.send(embed=news_story_embed(item, reason))
             seen.add(item["id"])
+            seen_list.append(item["id"])
             posted += 1
         except discord.HTTPException as e:
             logger.warning("[espn] Send failed: %s", e)
 
     for item in all_news:
-        seen.add(item["id"])
+        if item["id"] not in seen:
+            seen.add(item["id"])
+            seen_list.append(item["id"])
 
-    save_seen(seen)
+    save_seen(seen_list)
     if posted:
         logger.info("[espn] Posted %s news story(s)", posted)
     else:
@@ -309,7 +315,7 @@ async def auto_post_bluesky():
     if not active_handles:
         return
 
-    seen = load_seen()
+    seen, seen_list = load_seen()
     bsky_posts = await asyncio.to_thread(get_writer_posts, active_handles)
 
     if not bsky_posts:
@@ -325,14 +331,17 @@ async def auto_post_bluesky():
         try:
             await channel.send(embed=bluesky_embed(post))
             seen.add(post["id"])
+            seen_list.append(post["id"])
             posted += 1
         except discord.HTTPException as e:
             logger.warning("[bluesky] Send failed: %s", e)
 
     for post in bsky_posts:
-        seen.add(post["id"])
+        if post["id"] not in seen:
+            seen.add(post["id"])
+            seen_list.append(post["id"])
 
-    save_seen(seen)
+    save_seen(seen_list)
     if posted:
         logger.info("[bluesky] Posted %s post(s)", posted)
 
