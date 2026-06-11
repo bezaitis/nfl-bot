@@ -9,6 +9,7 @@ Slash commands:
   /source <source>     — set auto-post source (espn / bluesky / both)
   /interval <minutes>  — set ESPN auto-post check frequency
   /writers [writer]    — view or toggle Bluesky beat writers (with enable/disable all)
+  /settings            — interactive dashboard for source, interval, and writers
 
 Auto-posting:
   ESPN news stories    — every 30 min by default (adjustable via /interval)
@@ -35,6 +36,7 @@ from dotenv import load_dotenv
 from fetcher import get_news, get_transactions, get_all_news, get_player
 from scoring import score_text, POST_THRESHOLD
 from storage import load_seen, save_seen, load_settings, save_settings
+from teams import get_team_branding, identify_team
 from title_parser import build_structured_title
 from bluesky import get_writer_posts, WRITERS, WRITER_HANDLES
 
@@ -71,6 +73,10 @@ class NFLBot(commands.Bot):
                 logger.exception("Slash command sync failed")
         else:
             logger.debug("SYNC_COMMANDS not set — skipping tree sync")
+
+        # Warm the team branding cache off-thread so the first embed build
+        # doesn't block the event loop on an HTTP fetch.
+        await asyncio.to_thread(get_team_branding, "bears")
 
         if CHANNEL_ID:
             settings = load_settings()
@@ -114,15 +120,28 @@ def _has_manage_guild(interaction: discord.Interaction) -> bool:
 
 
 # ── Embed builders ────────────────────────────────────────────────────────────
+def link_view(label: str, url: str) -> discord.ui.View | None:
+    """A view holding a single URL button. URL-only views are stateless, so
+    they survive bot restarts without any persistence handling."""
+    if not url:
+        return None
+    view = discord.ui.View()
+    view.add_item(discord.ui.Button(label=label, url=url))
+    return view
+
+
 def transaction_embed(item: dict, reason: str = "") -> discord.Embed:
     team = item.get("team") or "NFL"
+    color, logo = get_team_branding(team)
     embed = discord.Embed(
         title=build_structured_title(item),
-        color=discord.Color.from_str("#013369"),  # NFL navy
+        color=discord.Color.from_str(color),
         timestamp=datetime.now(timezone.utc),
     )
     author_line = f"🏈 {team}" + (f"  ·  {reason}" if reason else "")
     embed.set_author(name=author_line)
+    if logo:
+        embed.set_thumbnail(url=logo)
     if item.get("date"):
         embed.set_footer(text=item["date"][:10])
     return embed
@@ -135,23 +154,25 @@ def bluesky_embed(post: dict) -> discord.Embed:
         timestamp=datetime.now(timezone.utc),
     )
     embed.set_author(name=f"🦋 {post['author']} (@{post['handle']})")
-    if post.get("url"):
-        embed.add_field(name="", value=f"[View on Bluesky]({post['url']})", inline=False)
     embed.set_footer(text="Source: Bluesky")
     return embed
 
 
 def news_story_embed(item: dict, reason: str = "") -> discord.Embed:
     summary = (item.get("summary") or "")[:300]
+    team = identify_team(item.get("title", "") + " " + summary)
+    color, logo = get_team_branding(team) if team else ("#D50A0A", "")
     embed = discord.Embed(
         title=item.get("title", "NFL News"),
         url=item.get("link") or None,
         description=summary,
-        color=discord.Color.from_str("#D50A0A"),
+        color=discord.Color.from_str(color),
         timestamp=datetime.now(timezone.utc),
     )
     if reason:
         embed.set_author(name=reason)
+    if logo:
+        embed.set_thumbnail(url=logo)
     embed.set_footer(text="Source: ESPN")
     return embed
 
@@ -255,7 +276,11 @@ async def auto_post_espn():
                 continue
             try:
                 reason = " · ".join(reasons[:3])
-                await channel.send(embed=news_story_embed(item, reason))
+                kwargs = {"embed": news_story_embed(item, reason)}
+                view = link_view("Read on ESPN", item.get("link", ""))
+                if view:
+                    kwargs["view"] = view
+                await channel.send(**kwargs)
                 seen.add(item["id"])
                 seen_list.append(item["id"])
                 posted += 1
@@ -303,7 +328,11 @@ async def auto_post_bluesky():
         posted = 0
         for post in selected:
             try:
-                await channel.send(embed=bluesky_embed(post))
+                kwargs = {"embed": bluesky_embed(post)}
+                view = link_view("View on Bluesky", post.get("url", ""))
+                if view:
+                    kwargs["view"] = view
+                await channel.send(**kwargs)
                 seen.add(post["id"])
                 seen_list.append(post["id"])
                 posted += 1
@@ -319,6 +348,106 @@ async def auto_post_bluesky():
 @auto_post_bluesky.before_loop
 async def before_loops():
     await bot.wait_until_ready()
+
+
+# ── /settings panel ───────────────────────────────────────────────────────────
+_SOURCE_LABELS = {"espn": "ESPN", "bluesky": "Bluesky", "both": "Both (ESPN + Bluesky)"}
+_INTERVAL_CHOICES = (10, 30, 60, 120)
+
+
+def settings_embed(settings: dict) -> discord.Embed:
+    source = settings.get("source", "both")
+    interval = settings.get("espn_interval", CHECK_INTERVAL_MINUTES)
+    disabled = set(settings.get("disabled_writers", []))
+    enabled_count = len(WRITER_HANDLES) - len(disabled & set(WRITER_HANDLES))
+    embed = discord.Embed(
+        title="⚙️ NFL Bot Settings",
+        color=discord.Color.from_str("#013369"),
+        timestamp=datetime.now(timezone.utc),
+    )
+    embed.add_field(name="Source", value=_SOURCE_LABELS.get(source, source), inline=True)
+    embed.add_field(name="ESPN interval", value=f"{interval} min", inline=True)
+    embed.add_field(
+        name="Writers",
+        value=f"{enabled_count}/{len(WRITER_HANDLES)} enabled",
+        inline=True,
+    )
+    embed.set_footer(text="Changes apply immediately and persist across restarts")
+    return embed
+
+
+class SourceSelect(discord.ui.Select):
+    def __init__(self, settings: dict):
+        current = settings.get("source", "both")
+        options = [
+            discord.SelectOption(label=label, value=value, default=value == current)
+            for value, label in _SOURCE_LABELS.items()
+        ]
+        super().__init__(placeholder="Auto-post source", options=options, row=0)
+
+    async def callback(self, interaction: discord.Interaction):
+        settings = load_settings()
+        settings["source"] = self.values[0]
+        save_settings(settings)
+        await interaction.response.edit_message(
+            embed=settings_embed(settings), view=SettingsView(settings)
+        )
+
+
+class IntervalSelect(discord.ui.Select):
+    def __init__(self, settings: dict):
+        current = settings.get("espn_interval", CHECK_INTERVAL_MINUTES)
+        options = [
+            discord.SelectOption(label=f"{m} minutes", value=str(m), default=m == current)
+            for m in _INTERVAL_CHOICES
+        ]
+        super().__init__(placeholder="ESPN check interval", options=options, row=1)
+
+    async def callback(self, interaction: discord.Interaction):
+        minutes = int(self.values[0])
+        settings = load_settings()
+        settings["espn_interval"] = minutes
+        save_settings(settings)
+        auto_post_espn.change_interval(minutes=minutes)
+        await interaction.response.edit_message(
+            embed=settings_embed(settings), view=SettingsView(settings)
+        )
+
+
+class WriterSelect(discord.ui.Select):
+    def __init__(self, settings: dict):
+        disabled = set(settings.get("disabled_writers", []))
+        options = [
+            discord.SelectOption(label=display, value=handle, default=handle not in disabled)
+            for handle, display in WRITERS.items()
+        ]
+        super().__init__(
+            placeholder="Enabled Bluesky writers",
+            options=options,
+            min_values=0,
+            max_values=len(options),
+            row=2,
+        )
+
+    async def callback(self, interaction: discord.Interaction):
+        enabled = set(self.values)
+        settings = load_settings()
+        settings["disabled_writers"] = [h for h in WRITER_HANDLES if h not in enabled]
+        save_settings(settings)
+        await interaction.response.edit_message(
+            embed=settings_embed(settings), view=SettingsView(settings)
+        )
+
+
+class SettingsView(discord.ui.View):
+    """Ephemeral dashboard — rebuilt on every change so the selects always
+    show the persisted state as their defaults."""
+
+    def __init__(self, settings: dict):
+        super().__init__(timeout=600)
+        self.add_item(SourceSelect(settings))
+        self.add_item(IntervalSelect(settings))
+        self.add_item(WriterSelect(settings))
 
 
 # ── Slash commands ─────────────────────────────────────────────────────────────
@@ -356,6 +485,11 @@ async def cmd_help(interaction: discord.Interaction):
     embed.add_field(
         name="/writers `[writer]`",
         value="View all Bluesky beat writers and their status. Pass a writer to toggle, or choose Enable All / Disable All.",
+        inline=False,
+    )
+    embed.add_field(
+        name="/settings",
+        value="Open an interactive dashboard with dropdowns for source, ESPN interval, and enabled writers (Manage Server required).",
         inline=False,
     )
     embed.set_footer(text="Auto-post: ESPN interval adjustable · Bluesky every 10 min")
@@ -495,6 +629,19 @@ async def cmd_writers(interaction: discord.Interaction, writer: str | None = Non
     icon = "✅" if action == "enabled" else "❌"
     await interaction.response.send_message(
         f"{icon} **{display}** has been **{action}**.", ephemeral=True
+    )
+
+
+@bot.tree.command(name="settings", description="Open the bot settings dashboard")
+async def cmd_settings(interaction: discord.Interaction):
+    if not _has_manage_guild(interaction):
+        await interaction.response.send_message(
+            "⚠️ You need Manage Server permission to change settings.", ephemeral=True
+        )
+        return
+    settings = load_settings()
+    await interaction.response.send_message(
+        embed=settings_embed(settings), view=SettingsView(settings), ephemeral=True
     )
 
 
