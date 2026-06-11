@@ -7,33 +7,11 @@ trims arbitrarily from an unordered set).
 
 We test the helpers in isolation to avoid needing a Discord token.
 """
-import json
 import tempfile
 import os
 import sys
 
-
-# ── copy of the helpers under test (matches bot.py exactly) ──────────────────
-
-SEEN_MAX_SIZE = 500
-SEEN_FILE = "seen_ids.json"  # overridden per-test
-
-
-def load_seen(path=None):
-    target = path or SEEN_FILE
-    try:
-        with open(target) as f:
-            data = json.load(f)
-        return set(data), list(data)
-    except (FileNotFoundError, json.JSONDecodeError):
-        return set(), []
-
-
-def save_seen(seen_list, path=None):
-    target = path or SEEN_FILE
-    trimmed = seen_list[-SEEN_MAX_SIZE:]
-    with open(target, "w") as f:
-        json.dump(trimmed, f)
+from storage import load_seen, save_seen, SEEN_MAX_SIZE
 
 
 # ── helpers ───────────────────────────────────────────────────────────────────

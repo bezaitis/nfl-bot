@@ -23,7 +23,6 @@ Setup:
 """
 
 import asyncio
-import json
 import logging
 import os
 from datetime import datetime, timezone
@@ -35,6 +34,7 @@ from dotenv import load_dotenv
 
 from fetcher import get_news, get_transactions, get_all_news, get_player
 from filters import is_notable_news
+from storage import load_seen, save_seen, load_settings, save_settings
 from title_parser import build_structured_title
 from bluesky import get_writer_posts, WRITER_HANDLES
 
@@ -51,15 +51,42 @@ logger = logging.getLogger("nfl-bot")
 # ── Config ────────────────────────────────────────────────────────────────────
 TOKEN = os.getenv("DISCORD_TOKEN")
 CHANNEL_ID = int(os.getenv("NEWS_CHANNEL_ID", "0"))
-CHECK_INTERVAL_MINUTES = int(os.getenv("CHECK_INTERVAL_MINUTES", "1"))
+CHECK_INTERVAL_MINUTES = int(os.getenv("CHECK_INTERVAL_MINUTES", "30"))
 SYNC_COMMANDS = os.getenv("SYNC_COMMANDS", "0").strip().lower() in ("1", "true", "yes")
-SEEN_FILE = "seen_ids.json"
-SETTINGS_FILE = "settings.json"
-SEEN_MAX_SIZE = 500
+
+# Serializes the load → post → save cycle of both auto-post loops so a slow
+# cycle in one loop can't overwrite the seen-state written by the other.
+seen_lock = asyncio.Lock()
+
 
 # ── Bot setup ─────────────────────────────────────────────────────────────────
+class NFLBot(commands.Bot):
+    async def setup_hook(self) -> None:
+        """Runs once after login (unlike on_ready, which fires on every reconnect)."""
+        if SYNC_COMMANDS:
+            try:
+                synced = await self.tree.sync()
+                logger.info("Synced %s slash command(s)", len(synced))
+            except Exception:
+                logger.exception("Slash command sync failed")
+        else:
+            logger.debug("SYNC_COMMANDS not set — skipping tree sync")
+
+        if CHANNEL_ID:
+            settings = load_settings()
+            saved_interval = settings.get("espn_interval", CHECK_INTERVAL_MINUTES)
+            if saved_interval != CHECK_INTERVAL_MINUTES:
+                auto_post_espn.change_interval(minutes=saved_interval)
+            auto_post_espn.start()
+            auto_post_bluesky.start()
+            logger.info("ESPN news loop: every %s min | Bluesky loop: every 10 min", saved_interval)
+            logger.info("Active source: %s → channel %s", settings.get("source", "both"), CHANNEL_ID)
+        else:
+            logger.warning("NEWS_CHANNEL_ID not set — auto-posting disabled")
+
+
 intents = discord.Intents.default()
-bot = commands.Bot(command_prefix="!", intents=intents)
+bot = NFLBot(command_prefix="!", intents=intents)
 
 # ── Writer metadata ───────────────────────────────────────────────────────────
 WRITER_DISPLAY = {
@@ -86,38 +113,7 @@ _WRITER_CHOICES = [
 ]
 
 
-# ── Deduplication helpers ─────────────────────────────────────────────────────
-def load_seen() -> tuple[set[str], list[str]]:
-    """Return (set for O(1) lookup, ordered list for insertion-order trimming)."""
-    try:
-        with open(SEEN_FILE) as f:
-            data = json.load(f)
-        return set(data), list(data)
-    except (FileNotFoundError, json.JSONDecodeError):
-        return set(), []
-
-
-def save_seen(seen_list: list[str]) -> None:
-    """Persist seen IDs, keeping only the most recent SEEN_MAX_SIZE entries."""
-    trimmed = seen_list[-SEEN_MAX_SIZE:]
-    with open(SEEN_FILE, "w") as f:
-        json.dump(trimmed, f)
-
-
 # ── Settings helpers ──────────────────────────────────────────────────────────
-def load_settings() -> dict:
-    try:
-        with open(SETTINGS_FILE) as f:
-            return json.load(f)
-    except (FileNotFoundError, json.JSONDecodeError):
-        return {"source": "both", "disabled_writers": []}
-
-
-def save_settings(settings: dict) -> None:
-    with open(SETTINGS_FILE, "w") as f:
-        json.dump(settings, f, indent=2)
-
-
 def get_active_handles(settings: dict) -> list[str]:
     disabled = set(settings.get("disabled_writers", []))
     return [h for h in WRITER_HANDLES if h not in disabled]
@@ -228,27 +224,6 @@ def player_embed(player: dict) -> discord.Embed:
 @bot.event
 async def on_ready():
     logger.info("Logged in as %s (ID: %s)", bot.user, bot.user.id)
-    if SYNC_COMMANDS:
-        try:
-            synced = await bot.tree.sync()
-            logger.info("Synced %s slash command(s)", len(synced))
-        except Exception as e:
-            logger.exception("Slash command sync failed: %s", e)
-    else:
-        logger.debug("SYNC_COMMANDS not set — skipping tree sync")
-
-    if CHANNEL_ID:
-        settings = load_settings()
-        source = settings.get("source", "both")
-        saved_interval = settings.get("espn_interval", CHECK_INTERVAL_MINUTES)
-        if saved_interval != CHECK_INTERVAL_MINUTES:
-            auto_post_espn.change_interval(minutes=saved_interval)
-        auto_post_espn.start()
-        auto_post_bluesky.start()
-        logger.info("ESPN news loop: every %s min | Bluesky loop: every 10 min", saved_interval)
-        logger.info("Active source: %s → channel %s", source, CHANNEL_ID)
-    else:
-        logger.warning("NEWS_CHANNEL_ID not set — auto-posting disabled")
 
 
 # ── Scheduled tasks ───────────────────────────────────────────────────────────
@@ -263,37 +238,39 @@ async def auto_post_espn():
         logger.warning("[espn] Channel %s not found", CHANNEL_ID)
         return
 
-    seen, seen_list = load_seen()
     all_news = await asyncio.to_thread(get_all_news, 50)
 
     if not all_news:
         logger.warning("[espn] Feed fetch returned empty — skipping this cycle")
         return
 
-    notable = []
-    for item in all_news:
-        if item["id"] in seen:
-            continue
-        should_post, reason = is_notable_news(item)
-        if should_post:
-            notable.append((item, reason))
+    async with seen_lock:
+        seen, seen_list = load_seen()
 
-    posted = 0
-    for item, reason in notable[:5]:
-        try:
-            await channel.send(embed=news_story_embed(item, reason))
-            seen.add(item["id"])
-            seen_list.append(item["id"])
-            posted += 1
-        except discord.HTTPException as e:
-            logger.warning("[espn] Send failed: %s", e)
+        notable = []
+        for item in all_news:
+            if item["id"] in seen:
+                continue
+            should_post, reason = is_notable_news(item)
+            if should_post:
+                notable.append((item, reason))
 
-    for item in all_news:
-        if item["id"] not in seen:
-            seen.add(item["id"])
-            seen_list.append(item["id"])
+        posted = 0
+        for item, reason in notable[:5]:
+            try:
+                await channel.send(embed=news_story_embed(item, reason))
+                seen.add(item["id"])
+                seen_list.append(item["id"])
+                posted += 1
+            except discord.HTTPException as e:
+                logger.warning("[espn] Send failed: %s", e)
 
-    save_seen(seen_list)
+        for item in all_news:
+            if item["id"] not in seen:
+                seen.add(item["id"])
+                seen_list.append(item["id"])
+
+        save_seen(seen_list)
     if posted:
         logger.info("[espn] Posted %s news story(s)", posted)
     else:
@@ -315,33 +292,35 @@ async def auto_post_bluesky():
     if not active_handles:
         return
 
-    seen, seen_list = load_seen()
     bsky_posts = await asyncio.to_thread(get_writer_posts, active_handles)
 
     if not bsky_posts:
         logger.warning("[bluesky] Feed fetch returned empty — skipping this cycle")
         return
 
-    posted = 0
-    for post in bsky_posts:
-        if posted >= 5:
-            break
-        if post["id"] in seen:
-            continue
-        try:
-            await channel.send(embed=bluesky_embed(post))
-            seen.add(post["id"])
-            seen_list.append(post["id"])
-            posted += 1
-        except discord.HTTPException as e:
-            logger.warning("[bluesky] Send failed: %s", e)
+    async with seen_lock:
+        seen, seen_list = load_seen()
 
-    for post in bsky_posts:
-        if post["id"] not in seen:
-            seen.add(post["id"])
-            seen_list.append(post["id"])
+        posted = 0
+        for post in bsky_posts:
+            if posted >= 5:
+                break
+            if post["id"] in seen:
+                continue
+            try:
+                await channel.send(embed=bluesky_embed(post))
+                seen.add(post["id"])
+                seen_list.append(post["id"])
+                posted += 1
+            except discord.HTTPException as e:
+                logger.warning("[bluesky] Send failed: %s", e)
 
-    save_seen(seen_list)
+        for post in bsky_posts:
+            if post["id"] not in seen:
+                seen.add(post["id"])
+                seen_list.append(post["id"])
+
+        save_seen(seen_list)
     if posted:
         logger.info("[bluesky] Posted %s post(s)", posted)
 
@@ -397,7 +376,7 @@ async def cmd_help(interaction: discord.Interaction):
 @app_commands.describe(team="Team name or abbreviation (e.g. Bears, CHI, 49ers)")
 async def cmd_team(interaction: discord.Interaction, team: str):
     await interaction.response.defer()
-    items = get_transactions(limit=5, team_filter=team)
+    items = await asyncio.to_thread(get_transactions, limit=5, team_filter=team)
     if not items:
         await interaction.followup.send(
             f"⚠️ No recent transactions found for **{team}**. "
@@ -412,7 +391,7 @@ async def cmd_team(interaction: discord.Interaction, team: str):
 @app_commands.describe(team="Optional team filter (e.g. Bears, CHI, Chicago)")
 async def cmd_news(interaction: discord.Interaction, team: str | None = None):
     await interaction.response.defer()
-    items = get_news(limit=10, team_filter=team)
+    items = await asyncio.to_thread(get_news, limit=10, team_filter=team)
     if not items:
         msg = (
             f"⚠️ No recent news found for **{team}**. Try a different spelling or check back later."
@@ -450,7 +429,6 @@ async def cmd_source(interaction: discord.Interaction, source: str):
 @bot.tree.command(name="interval", description="Set how often the ESPN auto-post loop checks for new transactions")
 @app_commands.describe(minutes="Check interval in minutes")
 @app_commands.choices(minutes=[
-    app_commands.Choice(name="1 minute (debug)", value=1),
     app_commands.Choice(name="10 minutes", value=10),
     app_commands.Choice(name="30 minutes", value=30),
     app_commands.Choice(name="60 minutes", value=60),
@@ -534,7 +512,7 @@ async def cmd_writers(interaction: discord.Interaction, writer: str | None = Non
 @app_commands.describe(name="Player name (e.g. Ja'Marr Chase, Patrick Mahomes)")
 async def cmd_player(interaction: discord.Interaction, name: str):
     await interaction.response.defer()
-    player = get_player(name)
+    player = await asyncio.to_thread(get_player, name)
     if not player:
         await interaction.followup.send(
             f"⚠️ Could not find **{name}**. Check the spelling and try again.",
