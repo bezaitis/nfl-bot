@@ -24,6 +24,12 @@ _ESPN_HEADERS = {
     "Pragma": "no-cache",
 }
 
+# Shared session: connection re-use across the auto-post loops and the
+# parallel roster search (pool sized for get_player's 16 workers).
+_session = requests.Session()
+_session.headers.update(_ESPN_HEADERS)
+_session.mount("https://", requests.adapters.HTTPAdapter(pool_maxsize=20))
+
 ESPN_TRANSACTIONS_URL = (
     "https://sports.core.api.espn.com/v2/sports/football/leagues/nfl/transactions"
     "?limit=50"
@@ -77,10 +83,10 @@ def _normalize_team(query: str) -> str:
 def get_all_transactions(limit: int = 50) -> list[dict]:
     """
     Fetch raw NFL transactions — no filtering applied.
-    Used by the auto-post loop, which passes items through filters.py.
+    Callers pass items through the scorer in scoring.py.
     """
     try:
-        resp = requests.get(ESPN_TRANSACTIONS_URL, headers=_ESPN_HEADERS, timeout=10)
+        resp = _session.get(ESPN_TRANSACTIONS_URL, timeout=10)
         resp.raise_for_status()
         data = resp.json()
         logger.debug("[espn] Transactions fetch OK — HTTP %s", resp.status_code)
@@ -117,7 +123,7 @@ def get_transactions(limit: int = 8, team_filter: str | None = None) -> list[dic
     Returns a list of dicts: {id, title, description, team}
     """
     try:
-        resp = requests.get(ESPN_TRANSACTIONS_URL, headers=_ESPN_HEADERS, timeout=10)
+        resp = _session.get(ESPN_TRANSACTIONS_URL, timeout=10)
         resp.raise_for_status()
         data = resp.json()
         logger.debug("[espn] Transactions fetch OK — HTTP %s", resp.status_code)
@@ -167,7 +173,7 @@ def _fetch_rss_feed() -> feedparser.FeedParserDict | None:
     then parse the raw content offline via feedparser. Returns None on failure.
     """
     try:
-        resp = requests.get(ESPN_NEWS_RSS, headers=_ESPN_HEADERS, timeout=15)
+        resp = _session.get(ESPN_NEWS_RSS, timeout=15)
         resp.raise_for_status()
         if not resp.content:
             logger.warning("[espn] News RSS returned empty body (HTTP %s)", resp.status_code)
@@ -251,7 +257,7 @@ def get_player(name: str) -> dict | None:
     a Spotrac search link, or None if not found.
     """
     try:
-        teams_resp = requests.get(ESPN_TEAMS_URL, headers=_ESPN_HEADERS, params={"limit": 32}, timeout=10)
+        teams_resp = _session.get(ESPN_TEAMS_URL, params={"limit": 32}, timeout=10)
         teams_resp.raise_for_status()
         teams = [
             (t["team"]["id"], t["team"]["displayName"])
@@ -262,9 +268,8 @@ def get_player(name: str) -> dict | None:
 
         def fetch_and_search(team_id, team_name):
             try:
-                resp = requests.get(
+                resp = _session.get(
                     f"{ESPN_TEAMS_URL}/{team_id}/roster",
-                    headers=_ESPN_HEADERS,
                     timeout=10,
                 )
                 resp.raise_for_status()

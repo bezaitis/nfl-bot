@@ -33,10 +33,10 @@ from discord.ext import commands, tasks
 from dotenv import load_dotenv
 
 from fetcher import get_news, get_transactions, get_all_news, get_player
-from filters import is_notable_news
+from scoring import score_text, POST_THRESHOLD
 from storage import load_seen, save_seen, load_settings, save_settings
 from title_parser import build_structured_title
-from bluesky import get_writer_posts, WRITER_HANDLES
+from bluesky import get_writer_posts, WRITERS, WRITER_HANDLES
 
 load_dotenv()
 
@@ -89,27 +89,12 @@ intents = discord.Intents.default()
 bot = NFLBot(command_prefix="!", intents=intents)
 
 # ── Writer metadata ───────────────────────────────────────────────────────────
-WRITER_DISPLAY = {
-    "rapsheet.bsky.social":        "Ian Rapoport (NFL Network)",
-    "diannarussini.bsky.social":   "Dianna Russini (The Athletic)",
-    "tednguyen.bsky.social":       "Ted Nguyen (The Athletic)",
-    "miketanier.bsky.social":      "Mike Tanier (Freelance)",
-    "kevinseifert.bsky.social":    "Kevin Seifert (ESPN)",
-    "wyche89.bsky.social":         "Steve Wyche (NFL Network)",
-    "agetzenberg.bsky.social":     "Alaina Getzenberg (ESPN)",
-    "ml-j.bsky.social":            "Marcel Louis-Jacques (ESPN)",
-    "profootballtalk.bsky.social": "ProFootballTalk (NBC Sports)",
-    "jamisonhensley.bsky.social":  "Jamison Hensley (ESPN)",
-    "jennalaine.bsky.social":      "Jenna Laine (ESPN)",
-    "tompelissero.bsky.social":    "Tom Pelissero (NFL Network)",
-}
-
 _WRITER_CHOICES = [
     app_commands.Choice(name="✅ Enable All Writers", value="__all_on__"),
     app_commands.Choice(name="❌ Disable All Writers", value="__all_off__"),
 ] + [
     app_commands.Choice(name=display, value=handle)
-    for handle, display in WRITER_DISPLAY.items()
+    for handle, display in WRITERS.items()
 ]
 
 
@@ -247,28 +232,35 @@ async def auto_post_espn():
     async with seen_lock:
         seen, seen_list = load_seen()
 
-        notable = []
+        scored = []
         for item in all_news:
             if item["id"] in seen:
                 continue
-            should_post, reason = is_notable_news(item)
-            if should_post:
-                notable.append((item, reason))
+            score, reasons = score_text(
+                (item.get("title", "") + " " + item.get("summary", "")).strip()
+            )
+            scored.append((score, item, reasons))
+        scored.sort(key=lambda entry: entry[0], reverse=True)
 
         posted = 0
-        for item, reason in notable[:5]:
+        for score, item, reasons in scored:
+            if score < POST_THRESHOLD:
+                # Not worth posting — mark seen so it's never reconsidered.
+                seen.add(item["id"])
+                seen_list.append(item["id"])
+                continue
+            if posted >= 5:
+                # Above threshold but beyond the per-cycle cap — leave unseen
+                # so it posts next cycle instead of being silently dropped.
+                continue
             try:
+                reason = " · ".join(reasons[:3])
                 await channel.send(embed=news_story_embed(item, reason))
                 seen.add(item["id"])
                 seen_list.append(item["id"])
                 posted += 1
             except discord.HTTPException as e:
                 logger.warning("[espn] Send failed: %s", e)
-
-        for item in all_news:
-            if item["id"] not in seen:
-                seen.add(item["id"])
-                seen_list.append(item["id"])
 
         save_seen(seen_list)
     if posted:
@@ -301,12 +293,15 @@ async def auto_post_bluesky():
     async with seen_lock:
         seen, seen_list = load_seen()
 
+        # All fetched posts already cleared POST_THRESHOLD in bluesky.py.
+        # Pick the 5 highest-scored unseen posts, then post chronologically;
+        # the rest stay unseen and get another shot next cycle.
+        unseen = [p for p in bsky_posts if p["id"] not in seen]
+        selected = sorted(unseen, key=lambda p: p.get("score", 0), reverse=True)[:5]
+        selected.sort(key=lambda p: p.get("timestamp", ""))
+
         posted = 0
-        for post in bsky_posts:
-            if posted >= 5:
-                break
-            if post["id"] in seen:
-                continue
+        for post in selected:
             try:
                 await channel.send(embed=bluesky_embed(post))
                 seen.add(post["id"])
@@ -314,11 +309,6 @@ async def auto_post_bluesky():
                 posted += 1
             except discord.HTTPException as e:
                 logger.warning("[bluesky] Send failed: %s", e)
-
-        for post in bsky_posts:
-            if post["id"] not in seen:
-                seen.add(post["id"])
-                seen_list.append(post["id"])
 
         save_seen(seen_list)
     if posted:
@@ -465,7 +455,7 @@ async def cmd_writers(interaction: discord.Interaction, writer: str | None = Non
         lines = []
         for handle in WRITER_HANDLES:
             status = "❌" if handle in disabled else "✅"
-            display = WRITER_DISPLAY.get(handle, handle)
+            display = WRITERS.get(handle, handle)
             lines.append(f"{status} {display}")
         embed.description = "\n".join(lines)
         embed.set_footer(text="Use /writers <name> to toggle · Enable All / Disable All available")
@@ -501,7 +491,7 @@ async def cmd_writers(interaction: discord.Interaction, writer: str | None = Non
 
     settings["disabled_writers"] = list(disabled)
     save_settings(settings)
-    display = WRITER_DISPLAY.get(writer, writer)
+    display = WRITERS.get(writer, writer)
     icon = "✅" if action == "enabled" else "❌"
     await interaction.response.send_message(
         f"{icon} **{display}** has been **{action}**.", ephemeral=True
